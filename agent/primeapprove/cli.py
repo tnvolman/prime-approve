@@ -7,6 +7,8 @@
   pa pair-accept CODE|PHOTO       check the Prime's answer, compare codes, pin the Prime's key on "y"
   pa request --action JSON ...    show a signed request and its action code; remember it as pending
   pa verify CODE|PHOTO            check the Prime's reply; exit 0 only for a valid, unused APPROVE
+  pa gate-trust --prime-key HEX --agent-key HEX   pin keys in the gate's own state dir
+  pa gate REQUEST REPLY [--mode status|merge]      the GitHub gate (run it where the agent can't reach)
 
 CODE|PHOTO is the code text, `-` to read it from stdin, or a photo/screenshot of the QR.
 Exit codes: 0 ok / approved, 1 denied or declined, 2 invalid or error.
@@ -14,11 +16,13 @@ Exit codes: 0 ok / approved, 1 denied or declined, 2 invalid or error.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
+from pathlib import Path
 
-from . import qr, store
-from .protocol import (MAX_LIFETIME_SECS, PAIRED_PREFIX, REPLY_PREFIX, ProtocolError, action_code, summary_line,
+from . import gate, qr, store
+from .protocol import (MAX_LIFETIME_SECS, PAIRED_PREFIX, REPLY_PREFIX, REQ_PREFIX, ProtocolError, action_code, summary_line,
                        build_request, encode_pair_offer, fingerprint, glyphs, kid, pairing_code, parse_reply,
                        public_bytes, verify_paired_reply, verify_reply, GLYPH_COLORS, GLYPH_SHAPES)
 
@@ -136,6 +140,45 @@ def cmd_verify(a) -> int:
     return 1
 
 
+def _code_arg(arg: str, prefix: str) -> str:
+    """Code text, `-`, a text file holding the code, or a photo."""
+    if arg != "-" and os.path.isfile(arg):
+        try:
+            t = Path(arg).read_text().strip()
+            if t.startswith(prefix):
+                return t
+        except (UnicodeDecodeError, ValueError):
+            pass
+    return qr.read_input(arg, prefix)
+
+
+def _gate_home(a) -> Path:
+    return Path(a.gate_home) if a.gate_home else gate.gate_home()
+
+
+def cmd_gate_trust(a) -> int:
+    try:
+        prime = bytes.fromhex(a.prime_key)
+        agents = [bytes.fromhex(k) for k in a.agent_key]
+    except ValueError:
+        raise ProtocolError("keys must be hex") from None
+    path = gate.trust(prime, agents, _gate_home(a))
+    print(f"Pinned in {path}: {gate.describe_trust(_gate_home(a))}")
+    return 0
+
+
+def cmd_gate(a) -> int:
+    home = _gate_home(a)
+    req = _code_arg(a.request, REQ_PREFIX)
+    reply = _code_arg(a.reply, REPLY_PREFIX)
+    gh = gate.GitHub(gate.load_token(a.token_file, home), a.api or os.environ.get("PRIMEAPPROVE_GITHUB_API") or gate.DEFAULT_API)
+    if a.test_skip_head_precheck:
+        print("TEST ONLY: skipping the gate's head pre-check (merge mode; GitHub still checks the sha)")
+    r = gate.run_gate(req, reply, gh, mode=a.mode, home=home, test_skip_head_precheck=a.test_skip_head_precheck)
+    print(r.message)
+    return r.code
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="pa", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -155,10 +198,22 @@ def main(argv=None) -> int:
     s.add_argument("--png"); s.add_argument("--text", action="store_true", help="also print the code text")
     s = sub.add_parser("verify", help="check the Prime's reply")
     s.add_argument("reply")
+    s = sub.add_parser("gate-trust", help="pin the Prime key and agent keys for the gate")
+    s.add_argument("--prime-key", required=True, help="the Prime's app public key, 64 hex")
+    s.add_argument("--agent-key", required=True, action="append", help="an agent public key, 64 hex (repeatable)")
+    s.add_argument("--gate-home", help="gate state dir (default $PRIMEAPPROVE_GATE_HOME or ~/.primeapprove-gate)")
+    s = sub.add_parser("gate", help="verify a reply and mark (or merge) the exact PR head on GitHub")
+    s.add_argument("request", help="the signed request: code text, a text file, `-` or a photo")
+    s.add_argument("reply", help="the Prime's reply: code text, a text file, `-` or a photo")
+    s.add_argument("--mode", choices=["status", "merge"], default="status")
+    s.add_argument("--api", help=f"GitHub API base URL (default $PRIMEAPPROVE_GITHUB_API or {gate.DEFAULT_API})")
+    s.add_argument("--token-file", help="file holding the GitHub token (default: $GITHUB_TOKEN, else <gate home>/token)")
+    s.add_argument("--gate-home", help="gate state dir (default $PRIMEAPPROVE_GATE_HOME or ~/.primeapprove-gate)")
+    s.add_argument("--test-skip-head-precheck", action="store_true", help=argparse.SUPPRESS)
     a = p.parse_args(argv)
     try:
         return {"init": cmd_init, "pair": cmd_pair, "pair-accept": cmd_pair_accept,
-                "request": cmd_request, "verify": cmd_verify}[a.cmd](a)
+                "request": cmd_request, "verify": cmd_verify, "gate-trust": cmd_gate_trust, "gate": cmd_gate}[a.cmd](a)
     except ProtocolError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
