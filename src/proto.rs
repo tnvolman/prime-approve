@@ -219,12 +219,31 @@ fn action_text_ok(a: &str) -> bool {
     !a.is_empty() && a.len() <= MAX_ACTION && a.chars().all(|c| c == '\n' || (' '..='~').contains(&c))
 }
 
+/// No `\u` escapes anywhere in the action. Its bytes are already printable ASCII, so an escape could only
+/// smuggle in a character the allowlist refuses (`\u0455`, a Cyrillic look-alike) or make the decoded text
+/// differ from the raw text the person reads. `\\u` (an escaped backslash, then `u`) is plain text and allowed.
+fn no_unicode_escapes(a: &str) -> bool {
+    let mut it = a.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' && it.next() == Some('u') { return false; }
+    }
+    true
+}
+
+/// Tool names: 1 to 64 of `A-Z a-z 0-9 . _ -`. None of these can be written as a JSON escape other than
+/// `\u` (refused above), so the tool name on screen is always byte-for-byte the raw text.
+fn valid_tool(t: &str) -> bool {
+    !t.is_empty() && t.len() <= 64 && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Parses the action bytes into what the Prime shows. Err for anything the Prime must refuse:
 /// oversized, non-ASCII, not a JSON object with a string "tool", or a known tool with bad fields.
 pub fn action_view(action: &str) -> Result<ActionView, &'static str> {
     if !action_text_ok(action) { return Err("action must be printable ASCII JSON of 400 bytes or less"); }
+    if !no_unicode_escapes(action) { return Err("action must not use \\u escapes"); }
     let v: serde_json::Value = serde_json::from_str(action).map_err(|_| "action is not valid JSON")?;
     let tool = v.as_object().and_then(|o| o.get("tool")).and_then(|t| t.as_str()).ok_or("action needs a string \"tool\"")?;
+    if !valid_tool(tool) { return Err("tool name must be 1 to 64 of A-Z a-z 0-9 . _ -"); }
     match tool {
         "github.merge_pull_request" => {
             let m: MergePr = serde_json::from_str(action).map_err(|_| "merge action has missing, extra or repeated fields")?;
@@ -657,6 +676,23 @@ mod tests {
         let (r2, v, _) = decode_request(&encode_request(&r, &sk), &agents).unwrap();
         assert_eq!(summary_line(&v).as_deref(), Some("Merge → PR #2 → a/b"));
         assert_eq!(r2.hash(), hex::encode(Sha256::digest(r.action.as_bytes())));
+    }
+
+    #[test]
+    fn unicode_escapes_cannot_fake_a_tool_name() {
+        // "github.merge_pull_requeѕt" with a Cyrillic ѕ written as \u0455: valid JSON, ASCII on the wire.
+        let lookalike = r#"{"tool":"github.merge_pull_reque\u0455t","repo":"a/b","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}"#;
+        assert!(action_view(lookalike).is_err());
+        // An ASCII escape would show "github.delete_repo" for raw text that reads "\u0067ithub...".
+        assert!(action_view(r#"{"tool":"\u0067ithub.delete_repo"}"#).is_err());
+        assert!(action_view(r#"{"\u0074ool":"ci.run"}"#).is_err());
+        assert!(action_view(r#"{"tool":"ci.run","x":"\u0041"}"#).is_err());
+        assert!(action_view(r#"{"tool":"ci\/run"}"#).is_err());
+        assert!(action_view(r#"{"tool":"ci run"}"#).is_err());
+        // An escaped backslash followed by u is plain text, and the tool shown is exactly the raw text.
+        let ok = r#"{"tool":"ci.run","note":"a\\u0041"}"#;
+        assert_eq!(action_view(ok), Ok(ActionView::Unknown { tool: "ci.run".into() }));
+        assert!(ok.contains("\"ci.run\""));
     }
 
     #[test]

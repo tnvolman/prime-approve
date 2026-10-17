@@ -37,3 +37,13 @@ def test_title_does_not_change_what_the_prime_shows():
 def test_build_request_refuses_bad_action():
     with pytest.raises(ProtocolError):
         build_request(signing_key(bytes(32)), b"not json", "x", agent="t", ttl=60, now=1)
+
+
+def test_unicode_escapes_cannot_fake_a_tool_name():
+    head = "33393c61b3e595bfb83bb9b909e280b2f40f0976"
+    lookalike = '{"tool":"github.merge_pull_reque\\u0455t","repo":"a/b","pr":2,"method":"squash","head":"%s"}' % head
+    assert json.loads(lookalike)["tool"] == "github.merge_pull_reque\u0455t"   # valid JSON, ASCII bytes
+    for a in (lookalike, '{"tool":"\\u0067ithub.delete_repo"}', '{"\\u0074ool":"ci.run"}', '{"tool":"ci\\/run"}'):
+        with pytest.raises(ProtocolError):
+            action_view(a)
+    assert action_view('{"tool":"ci.run","note":"a\\\\u0041"}').tool == "ci.run"

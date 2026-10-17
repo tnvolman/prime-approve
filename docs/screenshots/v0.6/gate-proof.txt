@@ -1,0 +1,28 @@
+# Prime Approve gate: live proof on tnvolman/prime-approve PR #1 (October 17, 2026, times UTC from the API)
+# Approved head H1 = e4183b5396b1a2961860a75e24a4571932d2c505; after one more push, head H2 = 0be27a39c54caa2a353f1c190c81089834793b90
+
+$ pa gate req1.txt reply1.png --mode status
+POSTED prime-approve=success on tnvolman/prime-approve@e4183b5396b1a2961860a75e24a4571932d2c505 (Approved on Prime · code 3394 D7A6)
+
+$ gh api repos/tnvolman/prime-approve/commits/H1/status
+{"sha":"e4183b5396b1a2961860a75e24a4571932d2c505","state":"success","statuses":[{"context":"prime-approve","created_at":"2026-10-17T22:30:26Z","description":"Approved on Prime · code 3394 D7A6","state":"success"}]}
+
+# one more commit pushed to gate-demo
+$ gh api repos/tnvolman/prime-approve/commits/H2/status
+{"sha":"0be27a39c54caa2a353f1c190c81089834793b90","state":"pending","statuses":[],"total_count":0}
+
+$ pa gate req1.txt reply1.png --mode status   # old reply, head moved
+REFUSED (head moved: PR head is 0be27a39c54c, approved head is e4183b5396b1; nothing posted). This reply was also already used.
+exit=2
+
+$ pa gate req2.txt reply2.png --mode merge    # second approval for the old head
+REFUSED (head moved: PR head is 0be27a39c54c, approved head is e4183b5396b1; nothing posted).
+exit=2
+
+$ pa gate req2.txt reply2.png --mode merge --test-skip-head-precheck   # TEST ONLY: let GitHub check the sha
+TEST ONLY: skipping the gate's head pre-check (merge mode; GitHub still checks the sha)
+REFUSED by GitHub (409: Head branch was modified. Review and try the merge again.); nothing merged
+exit=2
+
+$ gh api repos/tnvolman/prime-approve/pulls/1
+{"head":"0be27a39c54caa2a353f1c190c81089834793b90","merged":false,"merged_at":null,"number":1,"state":"open"}

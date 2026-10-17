@@ -11,13 +11,14 @@ import hashlib
 import json
 import os
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 __all__ = [
+    "decode_request", "REQUEST_FIELDS",
     "REQ_PREFIX", "PAIR_PREFIX", "PAIRED_PREFIX", "REPLY_PREFIX", "HIGH_IMPACT_VERBS", "DENY_REASONS",
     "MAX_QR", "MAX_ACTION", "MAX_LIFETIME_SECS", "ActionView", "action_view", "summary_line", "ProtocolError", "Reply", "RequestRecord",
     "public_bytes", "signing_key", "kid", "action_hash", "action_code", "glyphs", "fingerprint", "pairing_code",
@@ -182,6 +183,8 @@ class ActionView:
     object: str | None = None
     target: str | None = None
     detail: str | None = None
+    # The parsed fields of a known tool (for executors such as the gate), straight from the action bytes.
+    fields: dict | None = field(default=None, compare=False, repr=False)
 
 
 class _Dup(ValueError):
@@ -193,6 +196,23 @@ def _no_dups(pairs):
     if len(keys) != len(set(keys)):
         raise _Dup("repeated key")
     return dict(pairs)
+
+
+def _no_unicode_escapes(a: str) -> bool:
+    """No \\u escapes (see no_unicode_escapes in proto.rs); an escaped backslash followed by u is fine."""
+    i = 0
+    while i < len(a):
+        if a[i] == "\\":
+            if a[i + 1:i + 2] == "u":
+                return False
+            i += 2
+        else:
+            i += 1
+    return True
+
+
+def _valid_tool(t: str) -> bool:
+    return 0 < len(t) <= 64 and all(c.isascii() and (c.isalnum() or c in "._-") for c in t)
 
 
 def _no_constant(name):
@@ -228,6 +248,8 @@ def action_view(action) -> ActionView:
             raise ProtocolError("action must be printable ASCII") from None
     if not action or len(action.encode()) > MAX_ACTION or not _printable(action, True):
         raise ProtocolError(f"action must be printable ASCII JSON of {MAX_ACTION} bytes or less")
+    if not _no_unicode_escapes(action):
+        raise ProtocolError("action must not use \\u escapes")
     try:
         # serde_json refuses NaN/Infinity and lone surrogates; refuse them here too.
         v = json.loads(action, parse_constant=_no_constant)
@@ -237,6 +259,8 @@ def action_view(action) -> ActionView:
     if not isinstance(v, dict) or not isinstance(v.get("tool"), str):
         raise ProtocolError('action needs a string "tool"')
     tool = v["tool"]
+    if not _valid_tool(tool):
+        raise ProtocolError("tool name must be 1 to 64 of A-Z a-z 0-9 . _ -")
     if tool == "github.merge_pull_request":
         try:
             m = json.loads(action, object_pairs_hook=_no_dups)
@@ -256,7 +280,8 @@ def action_view(action) -> ActionView:
             raise ProtocolError("merge head must be a 40-char lowercase commit SHA")
         if pr == 0:
             raise ProtocolError("merge pr must be a positive number")
-        return ActionView(tool, "Merge", f"PR #{pr}", m["repo"], f"{m['method']} · head {head[:7]}")
+        return ActionView(tool, "Merge", f"PR #{pr}", m["repo"], f"{m['method']} · head {head[:7]}",
+                          {"repo": m["repo"], "pr": pr, "method": m["method"], "head": head})
     return ActionView(tool)
 
 
@@ -385,3 +410,45 @@ def verify_reply(qr: str, app_pk: bytes, req_id: str, req_kid: str, req_hash: st
         return None
     msg = REPLY_DOMAIN + bytes([r.version, r.decision]) + rid + k + h + struct.pack(">I", r.at)
     return r if _verify(app_pk, r.sig, msg) else None
+
+
+# ------------------------------------------------------------------ reading requests (gate side)
+
+REQUEST_FIELDS = ("id", "kid", "agent", "title", "details", "action", "exp")
+
+
+def decode_request(qr: str, agent_pks: list[bytes]) -> tuple[dict, ActionView, bytes]:
+    """Reads a v2 request the way the Prime does (decode_request in proto.rs): size cap, signature by one of
+    `agent_pks` over the exact JSON bytes, exactly the seven fields (no duplicates, no extras), kid matching
+    the signing key, printable text, and the action through the same strict parser. Returns the body, the
+    parsed action and the signing key. The action hash is SHA-256 of body["action"] as received."""
+    if len(qr) > MAX_QR:
+        raise ProtocolError(f"request is {len(qr)} bytes; the cap is {MAX_QR}")
+    if not qr.startswith(REQ_PREFIX) or qr.count(".") != 1:
+        raise ProtocolError("not a primeapprove:v2: request")
+    body_b64, sig_b64 = qr[len(REQ_PREFIX):].split(".")
+    try:
+        raw, sig = b64d(body_b64), b64d(sig_b64)
+    except (ValueError, ProtocolError):
+        raise ProtocolError("request is not valid base64url") from None
+    signer = next((pk for pk in agent_pks if _verify(pk, sig, REQ_DOMAIN + raw)), None)
+    if signer is None:
+        raise ProtocolError("request isn't signed by a trusted agent key")
+    try:
+        body = json.loads(raw.decode("ascii"), object_pairs_hook=_no_dups, parse_constant=_no_constant)
+    except (_Dup, ValueError, UnicodeDecodeError):
+        raise ProtocolError("request body is not strict ASCII JSON") from None
+    if not isinstance(body, dict) or set(body) != set(REQUEST_FIELDS):
+        raise ProtocolError("request must have exactly the fields " + ", ".join(REQUEST_FIELDS))
+    if not all(isinstance(body[k], str) for k in REQUEST_FIELDS[:6]) or type(body["exp"]) is not int or body["exp"] < 0:
+        raise ProtocolError("request field has the wrong type")
+    if body["kid"] != kid(signer):
+        raise ProtocolError("request kid doesn't match its signing key")
+    try:
+        if len(bytes.fromhex(body["id"])) != 16 or body["id"] != body["id"].lower():
+            raise ValueError
+    except ValueError:
+        raise ProtocolError("request id must be 32 lowercase hex chars") from None
+    if not (_printable(body["title"], False) and _printable(body["details"], True) and _printable(body["agent"], False)):
+        raise ProtocolError("request text must be printable ASCII")
+    return body, action_view(body["action"]), signer
