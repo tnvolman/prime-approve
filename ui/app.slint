@@ -1,0 +1,103 @@
+import { Theme, UISize, Images, ControlSize, ButtonVariant } from "@ui/theme.slint";
+import { Callbacks } from "callbacks.slint";
+import { Button } from "@ui/button.slint";
+import { Card } from "@ui/card.slint";
+import { SlideToConfirm } from "@ui/slide_to_confirm.slint";
+
+export { Callbacks, Theme, Images, ControlSize }
+
+export component AppWindow inherits Window {
+    title: "Prime Approve";
+    preferred-width: UISize.screen-width;
+    preferred-height: UISize.screen-height;
+    background: Theme.palette-background;
+
+    in-out property <int> page: 0;
+    in property <string> status-line: "";
+    in property <string> paired-line: "";
+    in property <string> agent-line: "";
+    in property <string> req-title: "";
+    in property <string> req-details: "";
+    in property <string> meta-line: "";
+    in property <string> hash-line: "";
+    in-out property <bool> read-to-end: false;
+    in property <string> result-line: "";
+    in property <image> reply-qr;
+    in property <string> qr-line: "";
+    in property <string> error-title: "";
+    in property <string> error-body: "";
+
+    VerticalLayout {
+        padding-left: Theme.spacing-xl;
+        padding-right: Theme.spacing-xl;
+        padding-top: Theme.spacing-lg + UISize.control-center-status-bar-height;
+        padding-bottom: Theme.spacing-xl;
+        spacing: Theme.spacing-lg;
+
+        Text {
+            text: root.page == 0 ? "PRIME APPROVE" : root.page == 1 ? "REVIEW REQUEST" : root.page == 2 ? "SIGNED REPLY" : "REQUEST REJECTED";
+            color: Theme.palette-muted;
+            font-family: Theme.font-primary;
+            font-size: Theme.font-size-label;
+            font-weight: Theme.font-weight-semibold;
+            horizontal-alignment: center;
+        }
+
+        if root.page == 0: VerticalLayout {
+            spacing: Theme.spacing-lg;
+            Card { width: 100%; title: "Paired agents"; body: root.paired-line; footer: root.status-line; }
+            Rectangle { vertical-stretch: 1; }
+            Button { width: 100%; text: "Scan request (demo)"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.scan-demo(); } }
+            Button { width: 100%; text: "Try tampered request"; variant: ButtonVariant.secondary; full-width: true; clicked => { Callbacks.scan-tampered(); } }
+            Button { width: 100%; text: "Try replayed request"; variant: ButtonVariant.secondary; full-width: true; clicked => { Callbacks.scan-replay(); } }
+            Button { width: 100%; text: "Try hidden-text request"; variant: ButtonVariant.secondary; full-width: true; clicked => { Callbacks.scan-hidden(); } }
+        }
+
+        if root.page == 1: VerticalLayout {
+            spacing: Theme.spacing-md;
+            Text { text: root.agent-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-body; wrap: word-wrap; }
+            Rectangle {
+                vertical-stretch: 1;
+                border-radius: 16px; border-width: 1px; border-color: Theme.palette-muted.transparentize(0.6);
+                fl := Flickable {
+                    x: 20px; y: 16px; width: parent.width - 40px; height: parent.height - 32px;
+                    viewport-height: body.preferred-height;
+                    property <bool> at-end: self.viewport-height <= self.height + 2px || -self.viewport-y >= self.viewport-height - self.height - 4px;
+                    changed at-end => { if (self.at-end) { root.read-to-end = true; } }
+                    init => { if (self.at-end) { root.read-to-end = true; } }
+                    body := VerticalLayout {
+                        width: fl.width;
+                        spacing: Theme.spacing-sm;
+                        Text { text: root.req-title; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-semibold; wrap: word-wrap; }
+                        Text { text: root.req-details; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-body; wrap: word-wrap; }
+                        Text { text: root.meta-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; wrap: word-wrap; }
+                    }
+                }
+            }
+            Text { text: root.hash-line; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-label; font-weight: Theme.font-weight-semibold; horizontal-alignment: center; wrap: word-wrap; }
+            Text { visible: !root.read-to-end; text: "Scroll to the end to unlock approval"; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; horizontal-alignment: center; }
+            Button { width: 100%; text: "Deny"; variant: ButtonVariant.secondary; full-width: true; clicked => { Callbacks.deny(); } }
+            SlideToConfirm { width: 100%; height: 64px; vertical-stretch: 0; label: ""; hint: "Slide to approve"; confirmed-label: "Approved"; disabled: !root.read-to-end; activated => { Callbacks.approve(); } }
+        }
+
+        if root.page == 2: VerticalLayout {
+            spacing: Theme.spacing-md;
+            Text { text: root.result-line; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; horizontal-alignment: center; wrap: word-wrap; }
+            HorizontalLayout { alignment: center;
+                Rectangle { width: 300px; height: 300px; background: white; border-radius: 8px;
+                    Image { width: 284px; height: 284px; source: root.reply-qr; image-rendering: pixelated; }
+                }
+            }
+            Text { text: root.qr-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; horizontal-alignment: center; wrap: word-wrap; }
+            Rectangle { vertical-stretch: 1; }
+            Button { width: 100%; text: "Done"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.done(); } }
+        }
+
+        if root.page == 3: VerticalLayout {
+            spacing: Theme.spacing-lg;
+            Card { width: 100%; title: root.error-title; body: root.error-body; footer: "Nothing was signed."; }
+            Rectangle { vertical-stretch: 1; }
+            Button { width: 100%; text: "Back"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.done(); } }
+        }
+    }
+}

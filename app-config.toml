@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Foundation Devices, Inc. <hello@foundation.xyz>
+# SPDX-License-Identifier: MIT
+
+# Foundation application configuration
+app-name = "prime-approve"
+friendly-app-name = "Prime Approve"
+launcher-app-name = "Prime Approve"
+description = "Approve or deny agent requests by QR, offline"
+icon = "resources/icon.svg"
+theme = "resources/theme.json"
+app-id = "0xc89f8e722d58df18b853b2eb68c19473"
+min-keyos-version = "1.0.0"
+
+[publisher]
+name = ""
+contact-email = ""
+support-url = ""
+
+[permissions]
+template = ["gui-app", "fs-generic"]
+"os/security" = ["GetAppSeed"]
+
+[[qr-match-rules]]
+id = "prime-approve-request"
+priority = 4
+id-localizations = { en = "Prime Approve request" }
+sub-rules = { req = { QR = { regex-pattern = "^primeapprove:v1:", max-len = 800 } } }
