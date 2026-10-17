@@ -8,6 +8,16 @@ Status: v0.4 (compact reply) in progress, simulator-tested only. Not yet run on 
 
 ## Screenshots (KeyOS simulator, color-corrected)
 
+**Agent CLI end to end (v0.4, October 17, 2026):** a demo build's home with the **Paste** button, then a real pairing and approval driven by `pa` on a laptop: the Prime's pair-confirm screen for the `pa` agent key, its answer with the pairing code (`pa pair-accept` showed the same code), the request built by `pa request` (action code 1594 E5CC), and the reply QR that `pa verify` accepted as APPROVED. The codes were typed in through **Paste** because the simulator has no camera.
+
+<p>
+<img src="docs/screenshots/v0.4/demo-home.png" width="140" alt="Demo build home: Request, Pair and Paste buttons">
+<img src="docs/screenshots/v0.4/cli-pair-confirm.png" width="140" alt="Pair this agent? for the pa CLI key">
+<img src="docs/screenshots/v0.4/cli-pair-answer.png" width="140" alt="Pairing Agent 3: answer QR and pairing code">
+<img src="docs/screenshots/v0.4/cli-review.png" width="140" alt="Review of the request built by pa request">
+<img src="docs/screenshots/v0.4/cli-reply.png" width="140" alt="Approved reply that pa verify accepted">
+</p>
+
 **Compact reply (v0.4, October 17, 2026):** the demo request, the approved reply, the deny reasons and a denied reply ("Wrong action"). The reply QR is now 121 characters (version 5, 37×37 modules, medium error correction) and spans the full screen width, with the action code below it.
 
 <p>
@@ -106,6 +116,24 @@ The old JSON reply (`primeapprove:v1r:`, 416 bytes for an approve and 444 for a 
 
 App key: Ed25519 from HKDF-SHA256 (salt `prime-approve`, ikm = the KeyOS app seed via `GetAppSeed`, info `app key v1`). The app never touches the master seed.
 
+## Agent CLI
+
+`agent/` is the agent side: a Python 3.10+ package, `primeapprove`, with a library and a `pa` command for an AI agent or a person on a laptop. It needs `cryptography` and `qrcode`; reading QR photos also needs Pillow and `pyzbar` (or the `zbarimg` command).
+
+    pip install './agent[photo]'
+    pa init                                   # agent key in ~/.primeapprove/agent.key (mode 600, never printed)
+    pa pair --png offer.png                   # scan on the Prime, name the agent, tap Pair
+    pa pair-accept answer.jpg                 # shows the pairing code; type y only if the Prime shows the same
+    pa request --action '{"tool":"github.merge_pull_request","repo":"you/repo","pr":7,"head":"<sha>"}' \
+        --title "Merge PR #7 into main" --verb Merge --object "PR #7" --target repo
+    pa verify reply.jpg && echo "run the action"    # exit 0 only for a valid, unused approve
+
+- **`pa pair-accept`** checks the Prime's signed answer, then pins the Prime's key in `~/.primeapprove/prime.json` **only** if you answer `y` to "Does the Prime show the same code?". Anything else pins nothing; tap **Don't match** on the Prime too.
+- **`pa request`** hashes the **exact bytes** of `--action` (or `--action-file`); run exactly those bytes. It applies the Prime's own checks (printable ASCII, lengths, allowed verbs and summary characters, expiry of 10 minutes or less, the 800-byte cap), marks high-impact verbs as elevated, and refuses `--risk routine` for them. It prints the QR (terminal, and `--png`) and the action code with its colored shapes, and saves the request in `~/.primeapprove/pending/`.
+- **`pa verify`** reads the reply (text, `-` for stdin, or a photo), finds the pending request by its id prefix, verifies it against the **pinned** key over the full id, kid and action hash, and prints `APPROVED`, `DENIED(reason)` or `INVALID (why)`. Exit code 0 only for an approve. An answered request is marked used, so the same reply (or any second reply) is refused. Expired requests are refused.
+- The library mirrors `src/proto.rs` byte for byte. Its tests (`cd agent && pytest`) reproduce the Rust test vectors (demo hash `1594e5cc…`, action code, glyphs, kid, pairing code, the compact reply vector) and drive the CLI. **Cross tests:** `agent/tests/make_fixtures.py` writes `host-tests/fixtures/py_to_rust.json` (a Python-built request and pairing offer), which the Rust host tests accept, including checking that Python's request JSON is byte-identical to serde's. The Rust host tests write `host-tests/fixtures/rust_to_py.json` (Rust-signed replies and a pairing answer), which the Python tests verify. Both sides fail if a fixture drifts.
+- **Simulator:** demo builds have a **Paste** button, a text field that goes through the same handler as a scan. `foundation-passport-drive --sim input-text` can type a code into it, 48 characters per call, because the simulator has no camera. Non-demo builds don't have it.
+
 ## Pairing
 
 Pairing is two-way: the Prime learns the agent's key, and the agent learns (and pins) the Prime's key.
@@ -122,7 +150,7 @@ Why the order matters: the agent only learns the Prime's key from the answer QR,
 
 **Saved, and removable.** Confirmed pairings are saved in the app's storage and survive a restart. Up to 5 agents can be paired; re-pairing a key that's already paired just renames it. Tap an agent on the home screen to unpair it (or choose "Don't recognize this" when denying one of its requests). Unpairing is saved, so the agent stays unpaired after a restart, and the agent's requests are refused as "Bad signature" from then on.
 
-**Scanning.** **Scan code** takes either a request or a pairing offer, and the Launcher hands both to the app (`primeapprove:v1:` and `primeapprove:pair:v1:` match rules). Demo builds add a **Demo pair** button that generates a pairing offer from a fresh random key and feeds it through the same handler, because the simulator has no camera. A fresh random key means a demo pairing never leaves a publicly known key paired.
+**Scanning.** **Scan code** takes either a request or a pairing offer, and the Launcher hands both to the app (`primeapprove:v1:` and `primeapprove:pair:v1:` match rules). Demo builds add a **Pair** button (next to **Request** and **Paste**) that generates a pairing offer from a fresh random key and feeds it through the same handler, because the simulator has no camera. A fresh random key means a demo pairing never leaves a publicly known key paired.
 
 Sizes: the pairing offer is 228 bytes and the answer 246 bytes, both well under the 800-byte cap.
 
@@ -244,7 +272,7 @@ Requires the Foundation SDK 1.1.0. From this folder:
 
 A default build has no paired agent and no demo key. Pair an agent by scanning its pairing code (see *Pairing*).
 
-**Demo build.** Building with the `demo` cargo feature pairs a demo agent whose private key is public (anyone can sign as it), adds a **Demo request** button and, in debug builds, the Tampered, Replay and Hidden text tests. Every screen then shows a red **Demo key · not secure** banner. Never put a demo build on a device you use for real. The demo request is a real, already-merged PR (`tnvolman/typewright-website-audit` #2), pinned to its head commit.
+**Demo build.** Building with the `demo` cargo feature pairs a demo agent whose private key is public (anyone can sign as it), adds **Request** (a demo request), **Pair** (a demo pairing offer) and **Paste** (type a code in, for the simulator) buttons and, in debug builds, the Tampered, Replay and Hidden text tests. Every screen then shows a red **Demo key · not secure** banner. Never put a demo build on a device you use for real. The demo request is a real, already-merged PR (`tnvolman/typewright-website-audit` #2), pinned to its head commit.
 
 `tools/` holds the scripts used to drive the simulator and take screenshots with `foundation-passport-drive --sim`.
 
@@ -254,10 +282,11 @@ Change `app-id` in `app-config.toml`. The app's signing key is derived from the 
 
 ## Tests, docs and tools
 
-- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, the compact reply (round trip, every single-bit tamper fails, wrong pinned key, wrong request hash, id or kid, 78-byte payload and QR version 5, base45 against RFC 9285, a fixed test vector), and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set by the verb). Pending-pairing tests check that nothing is saved without Codes match. Pairing tests cover the offer and answer roundtrip, a forged offer signature, a far-future expiry, name checks, the pairing code (same both ways, changes if either key changes) and agent-side pinning (a reply from any other app key fails). One test, `known_gap_summary_not_bound_to_hash`, deliberately pins the open gap that the summary isn't tied to the hash yet; it gets flipped when the Prime reads the action itself. Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed).
+- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, the compact reply (round trip, every single-bit tamper fails, wrong pinned key, wrong request hash, id or kid, 78-byte payload and QR version 5, base45 against RFC 9285, a fixed test vector), and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set by the verb). Pending-pairing tests check that nothing is saved without Codes match. Pairing tests cover the offer and answer roundtrip, a forged offer signature, a far-future expiry, name checks, the pairing code (same both ways, changes if either key changes) and agent-side pinning (a reply from any other app key fails). One test, `known_gap_summary_not_bound_to_hash`, deliberately pins the open gap that the summary isn't tied to the hash yet; it gets flipped when the Prime reads the action itself. Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed). The host tests also include the cross tests with the Python agent library (`host-tests/src/lib.rs`).
 - `docs/colorblind.md`: the palette check behind the colorblind note.
 - `tools/colorblind.py`: re-runs that check (needs numpy). `--old` shows the previous palette.
-- `tools/decode_reply.py`: decodes a reply QR from a photo and verifies it against the pinned Prime key (needs zbar and the `cryptography` module).
+- `agent/`: the agent-side library and `pa` CLI (see *Agent CLI*).
+- `tools/decode_reply.py`: a wrapper around the agent library: `pa verify PHOTO`, or a check against explicit `--pubkey --id --kid --hash` values.
 - `tools/*.sh`: simulator driving and screenshot scripts.
 
 ## About the screenshots

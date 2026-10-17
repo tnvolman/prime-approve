@@ -72,7 +72,8 @@ export component AppWindow inherits Window {
     preferred-height: UISize.screen-height;
     background: Theme.palette-background;
 
-    // 0 home, 1 review, 2 reply, 3 error, 4 deny reason, 5 unpair prompt, 6 pair confirm, 7 paired reply
+    // 0 home, 1 review, 2 reply, 3 error, 4 deny reason, 5 unpair prompt, 6 pair confirm, 7 paired reply,
+    // 8 paste code (demo builds only)
     in-out property <int> page: 0;
     in property <bool> show-dev: false;
     // Demo builds only (cargo feature "demo"): a demo agent with a public key is paired.
@@ -89,6 +90,8 @@ export component AppWindow inherits Window {
     in property <string> pair-code: "";
     in property <bool> pair-repair: false;
     in property <string> app-key-line: "";
+    // Demo builds only: code text typed in by the simulator driver (it has no camera).
+    in-out property <string> paste-text: "";
     in property <[Recent]> recents: [];
 
     in property <bool> elevated: false;
@@ -141,8 +144,9 @@ export component AppWindow inherits Window {
             }
             if root.demo-mode: HorizontalLayout {
                 spacing: Theme.spacing-sm;
-                Button { size: ControlSize.md; variant: ButtonVariant.secondary; horizontal-stretch: 1; text: "Demo request"; clicked => { Callbacks.scan-demo(); } }
-                Button { size: ControlSize.md; variant: ButtonVariant.secondary; horizontal-stretch: 1; text: "Demo pair"; clicked => { Callbacks.scan-demo-pair(); } }
+                Button { size: ControlSize.md; variant: ButtonVariant.secondary; horizontal-stretch: 1; text: "Request"; clicked => { Callbacks.scan-demo(); } }
+                Button { size: ControlSize.md; variant: ButtonVariant.secondary; horizontal-stretch: 1; text: "Pair"; clicked => { Callbacks.scan-demo-pair(); } }
+                Button { size: ControlSize.md; variant: ButtonVariant.secondary; horizontal-stretch: 1; text: "Paste"; clicked => { Callbacks.open-paste(); } }
             }
             VerticalLayout {
                 spacing: Theme.spacing-sm;
@@ -364,6 +368,27 @@ export component AppWindow inherits Window {
             // Nothing is saved until "Codes match".
             Button { width: 100%; text: "Codes match"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.pair-match(); } }
             Button { width: 100%; text: "Don't match"; variant: ButtonVariant.danger; full-width: true; clicked => { Callbacks.pair-mismatch(); } }
+        }
+
+        // ---------- Paste code (demo builds only) ----------
+        // The simulator has no camera, so `foundation-passport-drive input-text` types a code here
+        // instead. The text goes through exactly the same handler and checks as a scanned code.
+        if root.page == 8: VerticalLayout {
+            spacing: Theme.spacing-md;
+            Label { text: "PASTE CODE · DEMO BUILD"; horizontal-alignment: center; }
+            Body { text: "For the simulator: type or paste a request or pairing code."; color: Theme.palette-muted; horizontal-alignment: center; }
+            Input {
+                width: 100%;
+                height: self.preferred-height;
+                vertical-stretch: 0;
+                placeholder: "primeapprove:...";
+                value <=> root.paste-text;
+                clearable: true;
+                submitted => { Callbacks.paste-submit(root.paste-text); }
+            }
+            Rectangle { vertical-stretch: 1; }
+            Button { width: 100%; text: "Read code"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.paste-submit(root.paste-text); } }
+            Button { width: 100%; text: "Cancel"; variant: ButtonVariant.ghost; full-width: true; clicked => { Callbacks.done(); } }
         }
     }
 }

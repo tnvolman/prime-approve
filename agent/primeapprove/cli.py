@@ -55,7 +55,7 @@ def cmd_pair_accept(a) -> int:
     sys.stdout.flush()
     answer = sys.stdin.readline().strip().lower()
     if answer not in ("y", "yes"):
-        print("Not pinned. Tap Don't match on the Prime; nothing was saved on either side.")
+        print("Not pinned. Tap Don't match on the Prime too, so it saves nothing either.")
         return 1
     path = store.pin_prime(app_pk, code)
     print(f"Pinned the Prime's key in {path}. Now tap Codes match on the Prime.")
