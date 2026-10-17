@@ -30,3 +30,9 @@ id = "prime-approve-request"
 priority = 4
 id-localizations = { en = "Prime Approve request" }
 sub-rules = { req = { QR = { regex-pattern = "^primeapprove:v1:", max-len = 800 } } }
+
+[[qr-match-rules]]
+id = "prime-approve-pair"
+priority = 4
+id-localizations = { en = "Prime Approve pairing code" }
+sub-rules = { pair = { QR = { regex-pattern = "^primeapprove:pair:v1:", max-len = 800 } } }

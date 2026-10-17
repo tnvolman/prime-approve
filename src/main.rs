@@ -7,7 +7,7 @@ mod theme;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint_keyos_platform::app_ui2;
@@ -44,12 +44,28 @@ struct Decision {
     at: u64,
 }
 
+/// A paired agent. `name` is what the person typed on the Prime; the agent never names itself.
+#[derive(Serialize, Deserialize, Clone)]
+struct Paired {
+    name: String,
+    /// Agent Ed25519 public key, hex.
+    pk: String,
+    paired_at: u64,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct State {
     launches: u64,
     seen: Vec<String>,
     #[serde(default)]
     recent: Vec<Decision>,
+    #[serde(default)]
+    agents: Vec<Paired>,
+}
+
+fn pk_of(p: &Paired) -> Option<VerifyingKey> {
+    let b: [u8; 32] = hex::decode(&p.pk).ok()?.try_into().ok()?;
+    VerifyingKey::from_bytes(&b).ok()
 }
 
 struct App {
@@ -62,6 +78,13 @@ struct App {
     current: Option<Request>,
     /// Paired (local) name of the agent that signed `current`.
     current_agent: String,
+    /// Key of the agent that signed `current` (offered for unpairing after "Don't recognize this").
+    current_key: Option<VerifyingKey>,
+    /// Agent key waiting on the pair-confirm screen.
+    pending_pair: Option<VerifyingKey>,
+    /// Agent the unpair prompt is about, and the page to return to afterwards.
+    unpair_target: Option<VerifyingKey>,
+    unpair_return: i32,
     last_good_qr: Option<String>,
     pending_reply: Option<String>,
 }
@@ -118,6 +141,23 @@ fn load(cx: &AppContext) -> State {
     cx.fs.durable_file_read(STATE_FILE, slint_keyos_platform::fs::Location::AppData).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
 }
 
+/// Rebuilds the in-memory agent list: saved pairings, plus the demo agent in demo builds
+/// (memory only, never saved, so it can't outlive a demo build).
+fn rebuild_agents(a: &mut App) {
+    let mut v: Vec<Agent> = a.state.agents.iter().filter_map(|p| pk_of(p).map(|k| Agent::new(&p.name, k))).collect();
+    #[cfg(feature = "demo")]
+    if !v.iter().any(|x| x.key == a.demo_agent.verifying_key()) {
+        v.insert(0, Agent::new(DEMO_AGENT, a.demo_agent.verifying_key()));
+    }
+    a.agents = v;
+}
+
+/// Pairing code split over two lines for the screen: "XXXX XXXX XXXX\nXXXX XXXX XXXX".
+fn code_two_lines(code: &str) -> String {
+    let g: Vec<&str> = code.split(' ').collect();
+    format!("{}\n{}", g[..3].join(" "), g[3..].join(" "))
+}
+
 fn show_error(ui: &AppWindow, title: &str, body: &str, next: &str) {
     ui.set_error_title(title.into());
     ui.set_error_body(body.into());
@@ -136,19 +176,18 @@ fn app_main(cx: AppContext, ui: AppWindow) {
     save(&cx, &state);
     log::info!("launch #{} with {} seen request IDs (storage test)", state.launches, state.seen.len());
 
+    log::info!("{} saved agent pairing(s)", state.agents.len());
     ui.set_demo_mode(DEMO);
     #[cfg(feature = "demo")]
     let demo_agent = demo_agent_key();
-    #[cfg(feature = "demo")]
-    let agents = vec![Agent::new(DEMO_AGENT, demo_agent.verifying_key())];
-    #[cfg(not(feature = "demo"))]
-    let agents: Vec<Agent> = Vec::new();
     let app = Rc::new(RefCell::new(App {
-        app_key: None, agents,
+        app_key: None, agents: Vec::new(),
         #[cfg(feature = "demo")]
         demo_agent,
-        state, current: None, current_agent: String::new(), last_good_qr: None, pending_reply: None,
+        state, current: None, current_agent: String::new(), current_key: None, last_good_qr: None, pending_reply: None,
+        pending_pair: None, unpair_target: None, unpair_return: 0,
     }));
+    rebuild_agents(&mut app.borrow_mut());
 
     let refresh_home = {
         let ui = ui.as_weak();
@@ -157,10 +196,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let ui = ui.unwrap();
             let a = app.borrow();
             ui.set_has_agent(!a.agents.is_empty());
-            if let Some(ag) = a.agents.first() {
-                ui.set_agent_name(ag.name.clone().into());
-                ui.set_agent_fp(fingerprint(&ag.key).into());
-            }
+            let rows: Vec<AgentRow> = a.agents.iter().map(|ag| AgentRow { name: ag.name.clone().into(), fp: fingerprint(&ag.key).into() }).collect();
+            ui.set_agents(slint::ModelRc::new(slint::VecModel::from(rows)));
             let rows: Vec<Recent> = a.state.recent.iter().rev().map(|d| Recent {
                 title: d.title.clone().into(), agent: d.agent.clone().into(), approved: d.approved, when: ago(d.at).into(),
             }).collect();
@@ -192,7 +229,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         });
     }
 
-    let handle_scan = {
+    let handle_request = {
         let ui = ui.as_weak();
         let app = app.clone();
         move |qr: String| {
@@ -200,13 +237,13 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let mut a = app.borrow_mut();
             // Show the PAIRED name (set locally at pairing), never the agent-supplied `agent` string,
             // because the band sits inside the trusted frame.
-            let res = decode_request(&qr, &a.agents).map(|(r, ag)| (r, ag.name.clone())).and_then(|(r, name)| {
+            let res = decode_request(&qr, &a.agents).map(|(r, ag)| (r, ag.name.clone(), ag.key)).and_then(|(r, name, key)| {
                 if a.state.seen.contains(&r.id) { return Err(Reject::AlreadyUsed); }
                 if let Some(now) = now_secs() { check_time(&r, now)?; }
-                Ok((r, name))
+                Ok((r, name, key))
             });
             match res {
-                Ok((r, paired_name)) => {
+                Ok((r, paired_name, key)) => {
                     let exp = match now_secs() { Some(now) => { let l = r.exp - now; format!("Expires in {}:{:02}", l / 60, l % 60) } None => "Expiry checked by agent".into() };
                     ui.set_agent_name(paired_name.clone().into());
                     ui.set_summary_line(summary_line(&r).unwrap_or_default().into());
@@ -221,6 +258,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     a.last_good_qr = Some(qr);
                     a.current = Some(r);
                     a.current_agent = paired_name;
+                    a.current_key = Some(key);
                     ui.set_page(1);
                 }
                 Err(e) => {
@@ -241,6 +279,58 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         }
     };
 
+    // A pairing offer: check it, then ask the person to name and confirm the agent.
+    let handle_pair = {
+        let ui = ui.as_weak();
+        let app = app.clone();
+        move |qr: String| {
+            let ui = ui.unwrap();
+            let mut a = app.borrow_mut();
+            let Some(app_pk) = a.app_key.as_ref().map(|k| k.verifying_key()) else {
+                show_error(&ui, "App key not ready", "The app key hasn't loaded yet, so this Prime can't pair.", "Try again in a moment.");
+                return;
+            };
+            match decode_pair_offer(&qr, now_secs()) {
+                Ok(pk) => {
+                    let hexpk = hex::encode(pk.as_bytes());
+                    let existing = a.state.agents.iter().find(|p| p.pk == hexpk).map(|p| p.name.clone());
+                    if existing.is_none() && a.state.agents.len() >= MAX_AGENTS {
+                        show_error(&ui, "Too many agents", &format!("This Prime already has {MAX_AGENTS} paired agents."), "Unpair one from the home screen, then scan again.");
+                        return;
+                    }
+                    ui.set_pair_repair(existing.is_some());
+                    ui.set_pair_name(existing.unwrap_or_default().into());
+                    ui.set_pair_default(format!("Agent {}", a.state.agents.len() + 1).into());
+                    ui.set_pair_error("".into());
+                    ui.set_pair_fp(fingerprint(&pk).into());
+                    ui.set_pair_code(code_two_lines(&pairing_code(&pk, &app_pk)).into());
+                    a.pending_pair = Some(pk);
+                    ui.set_page(6);
+                }
+                Err(e) => {
+                    log::info!("rejected pairing offer: {e:?}");
+                    let (t, b) = match e {
+                        Reject::TooLarge(n) => ("Too large to read", format!("This pairing code is {n} bytes; the limit is {MAX_QR}.")),
+                        Reject::BadSignature => ("Bad signature", "The pairing code wasn't signed by the key it offers.".to_string()),
+                        Reject::Expired => ("Expired", "This pairing code ran out of time.".to_string()),
+                        Reject::TooFarAhead => ("Expiry too long", format!("Pairing codes must expire within {} minutes.", MAX_LIFETIME_SECS / 60)),
+                        _ => ("Unreadable pairing code", "Something in the pairing code is wrong.".to_string()),
+                    };
+                    show_error(&ui, t, &b, "Ask your agent for a new pairing code.");
+                }
+            }
+        }
+    };
+
+    // Every scanned text goes through here: Scan button, Launcher handoff and demo buttons.
+    let handle_scan = {
+        let hr = handle_request.clone();
+        let hp = handle_pair.clone();
+        move |qr: String| {
+            if qr.starts_with(PAIR_PREFIX) { hp(qr) } else { hr(qr) }
+        }
+    };
+
     let cb = ui.global::<Callbacks>();
 
     // Real intake: open the system QR scanner. Only plain-text QRs are accepted; everything still goes
@@ -254,8 +344,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             slint_keyos_platform::spawn_local(async move {
                 use slint_keyos_platform::gui_server_api::navigation::qrscanner::{ScanQrOptions, ScanQrResult};
                 let opts = ScanQrOptions {
-                    header_title: "Scan request".into(),
-                    message: "Point the camera at your agent's Prime Approve code.".into(),
+                    header_title: "Scan".into(),
+                    message: "Point the camera at your agent's request or pairing code.".into(),
                     ..Default::default()
                 };
                 match slint_keyos_platform::navigation::async_open_qr_scanner::<gui_permissions::GuiPermissions>(opts).await {
@@ -311,6 +401,13 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             b[i] = if b[i] == 'A' { 'B' } else { 'A' };
             h(format!("{}.{}", b.into_iter().collect::<String>(), sig));
         }); }
+        // Demo pair: a FRESH random agent key each time, so a saved demo pairing is never a key
+        // anyone else holds (unlike the fixed demo agent). Goes through the same handler as a scan.
+        { let h = handle_scan.clone(); cb.on_scan_demo_pair(move || {
+            let mut seed = [0u8; 32];
+            getrandom::getrandom(&mut seed).expect("TRNG");
+            h(encode_pair_offer(&SigningKey::from_bytes(&seed), now_secs().unwrap_or(0) + 300));
+        }); }
         { let h = handle_scan.clone(); let app = app.clone(); let ui_w = ui.as_weak(); cb.on_scan_replay(move || {
             let last = app.borrow().last_good_qr.clone();
             match last { Some(q) => h(q), None => show_error(&ui_w.unwrap(), "Nothing to replay yet", "Answer a demo request first.", "Then try replaying it.") }
@@ -329,6 +426,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             a.state.seen.push(req.id.clone());
             if a.state.seen.len() > MAX_SEEN { a.state.seen.remove(0); }
             let agent = std::mem::take(&mut a.current_agent);
+            a.unpair_target = a.current_key.take();
+            a.unpair_return = 2;
             a.state.recent.push(Decision { title: req.title.clone(), agent, approved: approve, at: now_secs().unwrap_or(0) });
             if a.state.recent.len() > MAX_RECENT { a.state.recent.remove(0); }
             save(&cx, &a.state);
@@ -346,16 +445,80 @@ fn app_main(cx: AppContext, ui: AppWindow) {
     };
     { let d = decide.clone(); let ui = ui.as_weak(); cb.on_approve(move || { if d(true, None) { ui.unwrap().set_page(2); } }); }
     { let ui = ui.as_weak(); cb.on_deny(move || ui.unwrap().set_page(4)); }
-    { let d = decide.clone(); let ui = ui.as_weak(); cb.on_deny_with(move |r| {
+    { let d = decide.clone(); let ui = ui.as_weak(); let app = app.clone(); cb.on_deny_with(move |r| {
         let ui = ui.unwrap();
         let reason = if r.is_empty() { None } else { Some(r.as_str()) };
-        if d(false, reason) { ui.set_page(if r == "unrecognized" { 5 } else { 2 }); }
+        if d(false, reason) {
+            let name = app.borrow().agents.iter().find(|x| Some(x.key) == app.borrow().unpair_target).map(|x| x.name.clone());
+            match name {
+                Some(n) if r == "unrecognized" => { ui.set_agent_name(n.into()); ui.set_page(5); }
+                _ => ui.set_page(2),
+            }
+        }
     }); }
-    { let app = app.clone(); let ui = ui.as_weak(); cb.on_unpair(move |yes| {
+    // Unpair: removes the agent from saved state, so it stays unpaired after a relaunch.
+    { let app = app.clone(); let ui = ui.as_weak(); let cx = cx.clone(); let refresh_home = refresh_home.clone(); cb.on_unpair(move |yes| {
         let ui = ui.unwrap();
-        if yes { app.borrow_mut().agents.clear(); log::info!("agent unpaired"); }
-        ui.set_page(2);
+        let back = {
+            let mut a = app.borrow_mut();
+            let target = a.unpair_target.take();
+            if let (true, Some(k)) = (yes, target) {
+                let hexpk = hex::encode(k.as_bytes());
+                a.state.agents.retain(|p| p.pk != hexpk);
+                save(&cx, &a.state);
+                rebuild_agents(&mut a);
+                // The built-in demo agent lives in memory only; drop it until the next launch.
+                a.agents.retain(|x| x.key != k);
+                log::info!("agent unpaired, {} saved left", a.state.agents.len());
+            }
+            a.unpair_return
+        };
+        if back == 0 { refresh_home(); } else { ui.set_page(back); }
     }); }
+    // Tap a paired agent on the home screen to unpair it.
+    { let app = app.clone(); let ui = ui.as_weak(); cb.on_manage_agent(move |i| {
+        let ui = ui.unwrap();
+        let mut a = app.borrow_mut();
+        let Some((name, key)) = a.agents.get(i as usize).map(|x| (x.name.clone(), x.key)) else { return };
+        a.unpair_target = Some(key);
+        a.unpair_return = 0;
+        ui.set_agent_name(name.into());
+        ui.set_page(5);
+    }); }
+    // Pair: validate the person's name, save, then show the signed answer for the agent to scan.
+    { let app = app.clone(); let ui = ui.as_weak(); let cx = cx.clone(); cb.on_pair_confirm(move |typed| {
+        let ui = ui.unwrap();
+        let mut a = app.borrow_mut();
+        let typed = typed.trim().to_string();
+        let name = if typed.is_empty() { ui.get_pair_default().to_string() } else { typed };
+        if !valid_agent_name(&name) {
+            ui.set_pair_error(format!("Use 1 to {MAX_AGENT_NAME} plain letters, digits or symbols.").into());
+            return;
+        }
+        let (Some(pk), Some(app_key)) = (a.pending_pair.take(), a.app_key.clone()) else { return };
+        let hexpk = hex::encode(pk.as_bytes());
+        let now = now_secs().unwrap_or(0);
+        if let Some(p) = a.state.agents.iter_mut().find(|p| p.pk == hexpk) {
+            p.name = name.clone();
+        } else {
+            if a.state.agents.len() >= MAX_AGENTS {
+                show_error(&ui, "Too many agents", &format!("This Prime already has {MAX_AGENTS} paired agents."), "Unpair one from the home screen, then scan again.");
+                return;
+            }
+            a.state.agents.push(Paired { name: name.clone(), pk: hexpk, paired_at: now });
+        }
+        save(&cx, &a.state);
+        rebuild_agents(&mut a);
+        let reply = encode_paired_reply(&pk, &app_key);
+        let ok = verify_paired_reply(&reply, &pk) == Some(app_key.verifying_key());
+        log::info!("paired agent {} ({} saved), reply {} bytes, agent-side verify={ok}", fingerprint(&pk), a.state.agents.len(), reply.len());
+        let (img, info) = qr_image(&reply);
+        ui.set_reply_qr(img);
+        ui.set_qr_line(info.into());
+        ui.set_agent_name(name.into());
+        ui.set_page(7);
+    }); }
+    { let app = app.clone(); let r = refresh_home.clone(); cb.on_pair_cancel(move || { app.borrow_mut().pending_pair = None; r(); }); }
     { let r = refresh_home.clone(); cb.on_done(move || r()); }
 
     // Boot step. The app seed can only be fetched once the event loop is running (fetching it before
