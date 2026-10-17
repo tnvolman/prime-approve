@@ -44,15 +44,6 @@ struct Decision {
     at: u64,
 }
 
-/// A paired agent. `name` is what the person typed on the Prime; the agent never names itself.
-#[derive(Serialize, Deserialize, Clone)]
-struct Paired {
-    name: String,
-    /// Agent Ed25519 public key, hex.
-    pk: String,
-    paired_at: u64,
-}
-
 #[derive(Serialize, Deserialize, Default)]
 struct State {
     launches: u64,
@@ -82,6 +73,9 @@ struct App {
     current_key: Option<VerifyingKey>,
     /// Agent key waiting on the pair-confirm screen.
     pending_pair: Option<VerifyingKey>,
+    /// Pairing shown on the answer screen, waiting for "Codes match". Memory only: never saved until
+    /// confirmed, and dropped if the screen is left any other way or the app relaunches.
+    pair_answer: Option<PendingPair>,
     /// Agent the unpair prompt is about, and the page to return to afterwards.
     unpair_target: Option<VerifyingKey>,
     unpair_return: i32,
@@ -185,7 +179,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         #[cfg(feature = "demo")]
         demo_agent,
         state, current: None, current_agent: String::new(), current_key: None, last_good_qr: None, pending_reply: None,
-        pending_pair: None, unpair_target: None, unpair_return: 0,
+        pending_pair: None, pair_answer: None, unpair_target: None, unpair_return: 0,
     }));
     rebuild_agents(&mut app.borrow_mut());
 
@@ -194,6 +188,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let app = app.clone();
         move || {
             let ui = ui.unwrap();
+            // Home is reached from every exit; an unconfirmed pairing never survives it.
+            app.borrow_mut().pair_answer = None;
             let a = app.borrow();
             ui.set_has_agent(!a.agents.is_empty());
             let rows: Vec<AgentRow> = a.agents.iter().map(|ag| AgentRow { name: ag.name.clone().into(), fp: fingerprint(&ag.key).into() }).collect();
@@ -485,8 +481,10 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         ui.set_agent_name(name.into());
         ui.set_page(5);
     }); }
-    // Pair: validate the person's name, save, then show the signed answer for the agent to scan.
-    { let app = app.clone(); let ui = ui.as_weak(); let cx = cx.clone(); cb.on_pair_confirm(move |typed| {
+    // Pair: validate the person's name, then show the signed answer for the agent to scan. Nothing is
+    // saved yet: the agent only learns the Prime's key (and can show the pairing code) from this answer,
+    // so the pairing is saved only when the person taps "Codes match" after comparing.
+    { let app = app.clone(); let ui = ui.as_weak(); cb.on_pair_confirm(move |typed| {
         let ui = ui.unwrap();
         let mut a = app.borrow_mut();
         let typed = typed.trim().to_string();
@@ -497,27 +495,40 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         }
         let (Some(pk), Some(app_key)) = (a.pending_pair.take(), a.app_key.clone()) else { return };
         let hexpk = hex::encode(pk.as_bytes());
-        let now = now_secs().unwrap_or(0);
-        if let Some(p) = a.state.agents.iter_mut().find(|p| p.pk == hexpk) {
-            p.name = name.clone();
-        } else {
-            if a.state.agents.len() >= MAX_AGENTS {
-                show_error(&ui, "Too many agents", &format!("This Prime already has {MAX_AGENTS} paired agents."), "Unpair one from the home screen, then scan again.");
-                return;
-            }
-            a.state.agents.push(Paired { name: name.clone(), pk: hexpk, paired_at: now });
+        if !a.state.agents.iter().any(|p| p.pk == hexpk) && a.state.agents.len() >= MAX_AGENTS {
+            show_error(&ui, "Too many agents", &format!("This Prime already has {MAX_AGENTS} paired agents."), "Unpair one from the home screen, then scan again.");
+            return;
         }
-        save(&cx, &a.state);
-        rebuild_agents(&mut a);
         let reply = encode_paired_reply(&pk, &app_key);
         let ok = verify_paired_reply(&reply, &pk) == Some(app_key.verifying_key());
-        log::info!("paired agent {} ({} saved), reply {} bytes, agent-side verify={ok}", fingerprint(&pk), a.state.agents.len(), reply.len());
+        log::info!("pairing pending (not saved) for {}, reply {} bytes, agent-side verify={ok}", fingerprint(&pk), reply.len());
         let (img, info) = qr_image(&reply);
         ui.set_reply_qr(img);
         ui.set_qr_line(info.into());
-        ui.set_agent_name(name.into());
+        ui.set_agent_name(name.clone().into());
+        a.pair_answer = Some(PendingPair { pk, name });
         ui.set_page(7);
     }); }
+    // Answer screen: "Codes match" saves the pending pairing; "Don't match" throws it away.
+    for answer in [PairAnswer::CodesMatch, PairAnswer::DontMatch] {
+        let app = app.clone(); let ui = ui.as_weak(); let cx = cx.clone(); let r = refresh_home.clone();
+        let f = move || {
+            let full = {
+                let mut a = app.borrow_mut();
+                let pending = a.pair_answer.take();
+                let out = resolve_pairing(&mut a.state.agents, pending, answer, now_secs().unwrap_or(0));
+                if matches!(out, PairOutcome::Saved | PairOutcome::Renamed) {
+                    save(&cx, &a.state);
+                    rebuild_agents(&mut a);
+                }
+                log::info!("pairing answer {answer:?}: {out:?}, {} saved", a.state.agents.len());
+                out == PairOutcome::Full
+            };
+            r();
+            if full { show_error(&ui.unwrap(), "Too many agents", &format!("This Prime already has {MAX_AGENTS} paired agents."), "Unpair one from the home screen, then scan again."); }
+        };
+        if answer == PairAnswer::CodesMatch { cb.on_pair_match(f); } else { cb.on_pair_mismatch(f); }
+    }
     { let app = app.clone(); let r = refresh_home.clone(); cb.on_pair_cancel(move || { app.borrow_mut().pending_pair = None; r(); }); }
     { let r = refresh_home.clone(); cb.on_done(move || r()); }
 

@@ -334,12 +334,11 @@ export component AppWindow inherits Window {
             Button { width: 100%; text: "Cancel"; variant: ButtonVariant.ghost; full-width: true; clicked => { Callbacks.pair-cancel(); } }
         }
 
-        // ---------- Paired: answer QR for the agent ----------
+        // ---------- Pairing answer: QR for the agent, then the person confirms the codes match ----------
         if root.page == 7: VerticalLayout {
             spacing: Theme.spacing-md;
             HorizontalLayout { alignment: center; spacing: Theme.spacing-sm;
-                VerticalLayout { alignment: center; Mark { good: true; size: 28px; } }
-                Text { text: "Paired with " + root.agent-name; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; vertical-alignment: center; overflow: elide; }
+                Text { text: "Pairing " + root.agent-name; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; vertical-alignment: center; overflow: elide; }
             }
             HorizontalLayout { alignment: center;
                 Rectangle { width: 300px; height: 300px; background: white; border-radius: 12px;
@@ -347,9 +346,11 @@ export component AppWindow inherits Window {
                 }
             }
             PairCode { code: root.pair-code; }
-            Body { text: "Show this to your agent. Check this code matches your agent."; horizontal-alignment: center; font-weight: Theme.font-weight-semibold; }
+            Body { text: "Scan this with your agent, then compare the code it shows."; horizontal-alignment: center; font-weight: Theme.font-weight-semibold; }
             Rectangle { vertical-stretch: 1; }
-            Button { width: 100%; text: "Done"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.done(); } }
+            // Nothing is saved until "Codes match".
+            Button { width: 100%; text: "Codes match"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.pair-match(); } }
+            Button { width: 100%; text: "Don't match"; variant: ButtonVariant.danger; full-width: true; clicked => { Callbacks.pair-mismatch(); } }
         }
     }
 }

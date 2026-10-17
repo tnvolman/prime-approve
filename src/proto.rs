@@ -361,6 +361,56 @@ pub fn verify_paired_reply(qr: &str, agent_pk: &VerifyingKey) -> Option<Verifyin
     (r.kid == kid(agent_pk)).then_some(app_pk)
 }
 
+// ---------------------------------------------------------------- pairing: pending, then confirm
+
+/// A paired agent as saved on the Prime. `name` is what the person typed; the agent never names itself.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Paired {
+    pub name: String,
+    /// Agent Ed25519 public key, hex.
+    pub pk: String,
+    pub paired_at: u64,
+}
+
+/// A pairing the person started (tapped Pair) but hasn't confirmed yet. Memory only, never saved:
+/// leaving the answer screen any other way, or relaunching, throws it away.
+#[derive(Clone, Debug)]
+pub struct PendingPair {
+    pub pk: VerifyingKey,
+    pub name: String,
+}
+
+/// The person's answer on the answer screen, after comparing the code on the agent's screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PairAnswer { CodesMatch, DontMatch }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PairOutcome {
+    /// New agent saved.
+    Saved,
+    /// Already paired: the saved name was updated.
+    Renamed,
+    /// Nothing saved (Don't match, or no pending pairing).
+    Discarded,
+    /// Nothing saved: already MAX_AGENTS paired.
+    Full,
+}
+
+/// Resolves a pending pairing. Only `CodesMatch` with a pending pairing changes `saved`; the caller
+/// persists `saved` when the outcome is `Saved` or `Renamed`.
+pub fn resolve_pairing(saved: &mut Vec<Paired>, pending: Option<PendingPair>, answer: PairAnswer, now: u64) -> PairOutcome {
+    let Some(p) = pending else { return PairOutcome::Discarded };
+    if answer != PairAnswer::CodesMatch || !valid_agent_name(&p.name) { return PairOutcome::Discarded; }
+    let hexpk = hex::encode(p.pk.as_bytes());
+    if let Some(x) = saved.iter_mut().find(|x| x.pk == hexpk) {
+        x.name = p.name;
+        return PairOutcome::Renamed;
+    }
+    if saved.len() >= MAX_AGENTS { return PairOutcome::Full; }
+    saved.push(Paired { name: p.name, pk: hexpk, paired_at: now });
+    PairOutcome::Saved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +656,47 @@ mod tests {
         assert_ne!(pairing_code(&a, &agent_sk(8).verifying_key()), code, "app key swapped");
         assert_ne!(pairing_code(&p, &a), code, "order matters");
         println!("pairing code {code}");
+    }
+
+    // ---- Pairing is saved only after the person confirms the codes match (item 10.1) ----
+
+    fn pending(n: u8, name: &str) -> Option<PendingPair> {
+        Some(PendingPair { pk: agent_sk(n).verifying_key(), name: name.into() })
+    }
+
+    #[test]
+    fn pending_pairing_needs_confirmation() {
+        let mut saved: Vec<Paired> = Vec::new();
+        // Pair tapped, then the screen is left or the app relaunches: the pending pairing is dropped.
+        let p = pending(1, "Build bot");
+        drop(p);
+        assert!(saved.is_empty(), "no confirm, nothing saved");
+        assert_eq!(resolve_pairing(&mut saved, None, PairAnswer::CodesMatch, NOW), PairOutcome::Discarded);
+        assert!(saved.is_empty(), "confirm with nothing pending saves nothing");
+        // Don't match: nothing saved.
+        assert_eq!(resolve_pairing(&mut saved, pending(1, "Build bot"), PairAnswer::DontMatch, NOW), PairOutcome::Discarded);
+        assert!(saved.is_empty(), "don't match, nothing saved");
+        // Codes match: saved, with the name the person typed.
+        assert_eq!(resolve_pairing(&mut saved, pending(1, "Build bot"), PairAnswer::CodesMatch, NOW), PairOutcome::Saved);
+        assert_eq!(saved, vec![Paired { name: "Build bot".into(), pk: hex::encode(agent_sk(1).verifying_key().as_bytes()), paired_at: NOW }]);
+        // Don't match on a re-pair leaves the saved pairing as it was.
+        assert_eq!(resolve_pairing(&mut saved, pending(1, "Renamed"), PairAnswer::DontMatch, NOW), PairOutcome::Discarded);
+        assert_eq!(saved[0].name, "Build bot");
+        assert_eq!(resolve_pairing(&mut saved, pending(1, "Renamed"), PairAnswer::CodesMatch, NOW + 1), PairOutcome::Renamed);
+        assert_eq!((saved.len(), saved[0].name.as_str(), saved[0].paired_at), (1, "Renamed", NOW));
+    }
+
+    #[test]
+    fn pending_pairing_respects_limits() {
+        let mut saved: Vec<Paired> = Vec::new();
+        for n in 0..MAX_AGENTS as u8 {
+            assert_eq!(resolve_pairing(&mut saved, pending(n + 10, "A"), PairAnswer::CodesMatch, NOW), PairOutcome::Saved);
+        }
+        assert_eq!(resolve_pairing(&mut saved, pending(99, "Extra"), PairAnswer::CodesMatch, NOW), PairOutcome::Full);
+        assert_eq!(saved.len(), MAX_AGENTS);
+        // A bad name never gets saved, even with a confirm.
+        let mut empty: Vec<Paired> = Vec::new();
+        assert_eq!(resolve_pairing(&mut empty, pending(1, " bad"), PairAnswer::CodesMatch, NOW), PairOutcome::Discarded);
+        assert!(empty.is_empty());
     }
 }
