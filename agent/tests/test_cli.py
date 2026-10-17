@@ -101,7 +101,7 @@ def test_request_then_verify_photo(home, capsys, monkeypatch, tmp_path):
     code, out = run(capsys, monkeypatch, "request", "--action", PY["action"], "--title", "Merge PR #2 into main",
                     "--text")
     assert code == 0 and "ACTION CODE  1594 E5CC" in out
-    assert "The Prime will show:  Merge → PR #2 → tnvolman/typewright-website-audit  (squash merge at 33393c6)" in out
+    assert "The Prime will show:  Merge → PR #2 → tnvolman/typewright-website-audit  (squash · head 33393c6)" in out
     pending = list((home / "pending").glob("*.json"))
     assert len(pending) == 1
     rec = json.loads(pending[0].read_text())

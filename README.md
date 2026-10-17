@@ -8,6 +8,15 @@ Status: v0.4 (compact reply) in progress, simulator-tested only. Not yet run on 
 
 ## Screenshots (KeyOS simulator, color-corrected)
 
+**What the Prime shows (v0.5, October 17, 2026):** three requests built by `pa request` and typed in through **Paste**. A known merge: the Prime parsed the action and drew **Merge → PR #2 → tnvolman/typewright-website-audit** and `squash · head 33393c6` itself; the reply was accepted by `pa verify`. A lying request: the agent's title and details say PR #2 into the real repo, but the action merges PR #9 into `evil/other-repo`, and the parsed band shows exactly that (denied as "Wrong action"). An unknown tool (`github.delete_repo`) titled "Run the unit tests": shown raw under a yellow "Unrecognized action · read carefully" label and marked high impact.
+
+<p>
+<img src="docs/screenshots/v0.5/known-merge.png" width="140" alt="Known merge: parsed summary in the trusted frame, agent title under Agent says">
+<img src="docs/screenshots/v0.5/known-merge-approved.png" width="140" alt="Approved reply for the known merge">
+<img src="docs/screenshots/v0.5/lying-title.png" width="140" alt="Lying title: the agent says PR #2, the parsed band says PR #9 to evil/other-repo">
+<img src="docs/screenshots/v0.5/unknown-raw.png" width="140" alt="Unknown tool: raw action JSON under a yellow Unrecognized action label, high impact">
+</p>
+
 **Agent CLI end to end (v0.4, October 17, 2026):** a demo build's home with the **Paste** button, then a real pairing and approval driven by `pa` on a laptop: the Prime's pair-confirm screen for the `pa` agent key, its answer with the pairing code (`pa pair-accept` showed the same code), the request built by `pa request` (action code 1594 E5CC), and the reply QR that `pa verify` accepted as APPROVED. The codes were typed in through **Paste** because the simulator has no camera.
 
 <p>
@@ -64,7 +73,7 @@ Earlier v0.1 screenshots:
 
 ## Formats (see `src/proto.rs`)
 
-**Request QR** `primeapprove:v1:<b64url(json)>.<b64url(ed25519 sig)>`. The signature covers `"primeapprove-req-v1\n" + json`, the exact bytes received. The whole QR must be 800 bytes or less.
+**Request QR (v0.5)** `primeapprove:v2:<b64url(json)>.<b64url(ed25519 sig)>`. The signature covers `"primeapprove-req-v2\n" + json`, the exact bytes received. The whole QR must be 800 bytes or less. v1 requests (which carried an agent-computed `hash` and an agent-written summary) are refused.
 
 JSON fields:
 
@@ -75,18 +84,17 @@ JSON fields:
 | `agent` | the agent's display name. Checked for hidden characters but **not shown in the trusted band**; the band shows the name you gave the agent when you paired it |
 | `title` | 60 chars or fewer |
 | `details` | 280 chars or fewer; newlines allowed |
-| `risk` | `"routine"` or `"elevated"`. Anything else is rejected. Elevated (spends money, deletes, merges, sends) gets an amber "High impact" band |
-| `hash` | 64 hex chars: SHA-256 of the exact action bytes the agent will run, computed by the agent |
+| `action` | the exact action bytes the agent will run, as a JSON string: a JSON object with a string `"tool"`, printable ASCII (newlines allowed), 400 bytes or less. The Prime parses it and computes the action hash, SHA-256 of these bytes, itself |
 | `exp` | expiry, unix seconds |
-| `verb`, `object`, `target` | *optional, all three or none.* The structured summary (see below) |
+
+Only these seven fields are allowed (in this order when built by `pa`); unknown fields, duplicates, `risk`, `hash`, `verb`, `object` and `target` are rejected. The known merge request is 597 to 609 bytes.
 
 The Prime rejects a request that is:
 - too large or malformed
 - badly signed (checked against paired keys before anything is parsed)
 - carrying a `kid` that doesn't match the signing key
-- using a `risk` value it doesn't know
-- hiding control, bidi or zero-width characters in display text
-- carrying an invalid summary
+- hiding control, bidi or zero-width characters in display text or the action
+- carrying an action that isn't a JSON object with a string `tool`, is over 400 bytes, fails the ASCII allowlist, or names a known tool with missing, extra, duplicate or invalid fields
 - already answered
 - expired
 
@@ -124,16 +132,16 @@ App key: Ed25519 from HKDF-SHA256 (salt `prime-approve`, ikm = the KeyOS app see
     pa init                                   # agent key in ~/.primeapprove/agent.key (mode 600, never printed)
     pa pair --png offer.png                   # scan on the Prime, name the agent, tap Pair
     pa pair-accept answer.jpg                 # shows the pairing code; type y only if the Prime shows the same
-    pa request --action '{"tool":"github.merge_pull_request","repo":"you/repo","pr":7,"head":"<sha>"}' \
-        --title "Merge PR #7 into main" --verb Merge --object "PR #7" --target repo
+    pa request --action '{"tool":"github.merge_pull_request","repo":"you/repo","pr":7,"method":"squash","head":"<40-hex sha>"}' \
+        --title "Merge PR #7 into main"
     pa verify reply.jpg && echo "run the action"    # exit 0 only for a valid, unused approve
 
 - **`pa pair-accept`** checks the Prime's signed answer, then pins the Prime's key in `~/.primeapprove/prime.json` **only** if you answer `y` to "Does the Prime show the same code?". Anything else pins nothing; tap **Don't match** on the Prime too.
-- **`pa request`** hashes the **exact bytes** of `--action` (or `--action-file`); run exactly those bytes. It applies the Prime's own checks (printable ASCII, lengths, allowed verbs and summary characters, expiry of 10 minutes or less, the 800-byte cap), marks high-impact verbs as elevated, and refuses `--risk routine` for them. It prints the QR (terminal, and `--png`) and the action code with its colored shapes, and saves the request in `~/.primeapprove/pending/`.
+- **`pa request`** puts the **exact bytes** of `--action` (or `--action-file`) into the request; run exactly those bytes. `--title` and `--details` are optional and only ever shown as "Agent says". It applies the Prime's own checks (the action parser and allowlist, text lengths, expiry of 10 minutes or less, the 800-byte cap) and prints what the Prime will show: the parsed summary for a known tool, or a warning that an unknown tool will be shown raw and marked high impact. Then it prints the QR (terminal, and `--png`) and the action code with its colored shapes, and saves the request in `~/.primeapprove/pending/`.
 - **`pa verify`** reads the reply (text, `-` for stdin, or a photo), finds the pending request by its id prefix, verifies it against the **pinned** key over the full id, kid and action hash, and prints `APPROVED`, `DENIED(reason)` or `INVALID (why)`. Exit code 0 only for an approve. An answered request is marked used, so the same reply (or any second reply) is refused. Expired requests are refused.
 - **`pa verify` is not a lock on its own.** If it runs in the same account as the agent, a compromised agent can skip it, answer the pairing prompt itself, or edit its saved requests and pinned key. It becomes a real control only when it runs where the agent can't reach, with the credential behind it (planned item 14; see rule 4 in [`THREAT_MODEL.md`](THREAT_MODEL.md): don't let the agent hold the credential it is asking approval to use).
 - **Replacing the pinned Prime is deliberate.** If a different Prime key is already pinned, `pa pair-accept` shows the old and new key fingerprints with the warning "This replaces the Prime you trust" and pins only if you type `replace`. Re-pairing the same Prime is a plain `y`.
-- The library mirrors `src/proto.rs` byte for byte. Its tests (`cd agent && pytest`) reproduce the Rust test vectors (demo hash `1594e5cc…`, action code, glyphs, kid, pairing code, the compact reply vector) and drive the CLI. **Cross tests:** `agent/tests/make_fixtures.py` writes `host-tests/fixtures/py_to_rust.json` (a Python-built request and pairing offer), which the Rust host tests accept, including checking that Python's request JSON is byte-identical to serde's. The Rust host tests write `host-tests/fixtures/rust_to_py.json` (Rust-signed replies and a pairing answer), which the Python tests verify. Both sides fail if a fixture drifts.
+- The library mirrors `src/proto.rs` byte for byte, including the action parser: `host-tests/fixtures/actions.json` holds 31 shared parsing cases (known, unknown and rejected actions) that both the Rust and the Python tests run. Its tests (`cd agent && pytest`) reproduce the Rust test vectors (demo hash `1594e5cc…`, action code, glyphs, kid, pairing code, the compact reply vector) and drive the CLI. **Cross tests:** `agent/tests/make_fixtures.py` writes `host-tests/fixtures/py_to_rust.json` (Python-built known, lying-title and unknown-tool requests and a pairing offer), which the Rust host tests accept, including checking that Python's request JSON is byte-identical to serde's. The Rust host tests write `host-tests/fixtures/rust_to_py.json` (Rust-signed replies and a pairing answer), which the Python tests verify. Both sides fail if a fixture drifts.
 - **Simulator:** demo builds have a **Paste** button, a text field that goes through the same handler as a scan. `foundation-passport-drive --sim input-text` can type a code into it, 48 characters per call, because the simulator has no camera. Non-demo builds don't have it.
 
 ## Pairing
@@ -152,19 +160,27 @@ Why the order matters: the agent only learns the Prime's key from the answer QR,
 
 **Saved, and removable.** Confirmed pairings are saved in the app's storage and survive a restart. Up to 5 agents can be paired; re-pairing a key that's already paired just renames it. Tap an agent on the home screen to unpair it (or choose "Don't recognize this" when denying one of its requests). Unpairing is saved, so the agent stays unpaired after a restart, and the agent's requests are refused as "Bad signature" from then on.
 
-**Scanning.** **Scan code** takes either a request or a pairing offer, and the Launcher hands both to the app (`primeapprove:v1:` and `primeapprove:pair:v1:` match rules). Demo builds add a **Pair** button (next to **Request** and **Paste**) that generates a pairing offer from a fresh random key and feeds it through the same handler, because the simulator has no camera. A fresh random key means a demo pairing never leaves a publicly known key paired.
+**Scanning.** **Scan code** takes either a request or a pairing offer, and the Launcher hands both to the app (`primeapprove:v2:` and `primeapprove:pair:v1:` match rules). Demo builds add a **Pair** button (next to **Request** and **Paste**) that generates a pairing offer from a fresh random key and feeds it through the same handler, because the simulator has no camera. A fresh random key means a demo pairing never leaves a publicly known key paired.
 
 Sizes: the pairing offer is 228 bytes and the answer 246 bytes, both well under the 800-byte cap.
 
-## Structured summary line
+## What the Prime shows
 
-When a request carries `verb`, `object` and `target`, the Prime draws one line inside the trusted frame, for example **Merge → PR #2 → typewright-website-audit**.
+Since v0.5 the Prime doesn't take the agent's word for what the action is. The request carries the action bytes themselves; the Prime parses them, computes the action hash from the bytes it received, and builds the summary from the parsed action.
 
-- `verb` must be one of: `Merge`, `Deploy`, `Publish`, `Delete`, `Send`, `Pay`, `Sign`, `Run`, `Grant`, `Change`.
-- `object` can be up to 24 chars and `target` up to 40. Both use ASCII letters, digits, space and `# . _ / : @ -` only, with no leading or trailing spaces.
-- The arrows are drawn by the app. Agents can't send them, so an agent can't fake the layout.
+**Known tools** have a fixed parser in `src/proto.rs` (`action_view`). There is one so far:
 
-The summary is still supplied and signed by the agent, just like the title. The app limits how it can *look*, not whether it's *true*. What ties the request to the real action is the `hash`.
+| tool | fields (exactly these) | the Prime draws |
+|---|---|---|
+| `github.merge_pull_request` | `repo` (`owner/name`, letters, digits, `- _ .`, 64 chars or less), `pr` (integer above 0), `method` (`merge`, `squash` or `rebase`), `head` (40 lowercase hex) | **Merge → PR #&lt;pr&gt; → &lt;repo&gt;** and `<method> · head <first 7 of head>` |
+
+For a known tool, the summary line, the detail line and the amber "High impact" band come **only** from the parsed action. The agent's title and details appear smaller, under **Agent says**, in the scrolling area. A title that says "PR #2" can't change a band that says **PR #9 → evil/other-repo** (see the screenshots above). A known tool with a missing, extra, duplicate or badly formed field is refused, never shown with a friendlier view.
+
+**Unknown tools** (any other `"tool"`) are allowed, but the Prime shows the raw action JSON exactly as signed, character-wrapped and scrollable, under a yellow **Unrecognized action · read carefully** label. The frame says "Unrecognized: &lt;tool&gt;" and the request is always marked high impact. You have to read it.
+
+**Refused outright:** an action that isn't valid JSON (as `serde_json` reads it: no `NaN`, no lone surrogates), isn't an object with a string `tool`, is over 400 bytes, or has anything outside printable ASCII and newline.
+
+The hash is still plain SHA-256 of the action bytes, so the demo action keeps hash `1594e5cc…` and action code **1594 E5CC**, and the compact reply is unchanged. The arrows are drawn by the app. Recent decisions on the home screen record what the Prime showed (the parsed summary or "Unrecognized: tool"), not the agent's title.
 
 ## Visual action code
 
@@ -223,12 +239,12 @@ The real protection is on the agent. Before acting, the agent runs `verify_reply
 ## Trusted frame
 
 The Review screen has two app-only areas:
-- **the band:** the paired name, the risk level and the paired check
-- **the frame:** the summary line, action code, colored shapes and countdown
+- **the band:** the paired name, the high-impact level (from the parsed action) and the paired check
+- **the frame:** the summary and detail lines the Prime built from the parsed action (or "Unrecognized: tool"), action code, colored shapes and countdown
 
 Nothing the agent writes freely (title, details) is ever drawn inside either one. That text only appears in the scrolling area between them.
 
-What the frame means: the request is **verified from the paired agent, unchanged**, meaning it was signed by that agent's key and not altered on the way. It does not mean the action is safe or that the Prime has confirmed the summary is true. The summary is supplied by the agent.
+What the frame means: the request is **verified from the paired agent, unchanged**, and for a known tool the summary is what the signed action bytes actually say, because the Prime parsed them itself. It does not mean the action is safe, and for an unknown tool it means only "read the raw action above".
 
 ## Scroll gate
 
@@ -263,7 +279,7 @@ These are untested until a dev unit arrives:
 
 ## Scanning
 
-**Scan code** opens the system QR scanner (this needs the `ShowModal` permission). A request scanned from the Launcher's own scanner is handed to the app through the `primeapprove:v1:` QR match rule and picked up at launch. Either way, the text goes through the same checks: size, signature, paired agent, plain-ASCII text, expiry no more than 10 minutes out, and single use. The simulator has no camera, so neither path can be exercised there.
+**Scan code** opens the system QR scanner (this needs the `ShowModal` permission). A request scanned from the Launcher's own scanner is handed to the app through the `primeapprove:v2:` QR match rule and picked up at launch. Either way, the text goes through the same checks: size, signature, paired agent, plain-ASCII text, expiry no more than 10 minutes out, and single use. The simulator has no camera, so neither path can be exercised there.
 
 ## Build and run (simulator)
 
@@ -284,7 +300,7 @@ Change `app-id` in `app-config.toml`. The app's signing key is derived from the 
 
 ## Tests, docs and tools
 
-- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, the compact reply (round trip, every single-bit tamper fails, wrong pinned key, wrong request hash, id or kid, 78-byte payload and QR version 5, base45 against RFC 9285, a fixed test vector), and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set by the verb). Pending-pairing tests check that nothing is saved without Codes match. Pairing tests cover the offer and answer roundtrip, a forged offer signature, a far-future expiry, name checks, the pairing code (same both ways, changes if either key changes) and agent-side pinning (a reply from any other app key fails). One test, `known_gap_summary_not_bound_to_hash`, deliberately pins the open gap that the summary isn't tied to the hash yet; it gets flipped when the Prime reads the action itself. Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed). The host tests also include the cross tests with the Python agent library (`host-tests/src/lib.rs`).
+- `src/proto.rs` has unit tests for the protocol: the glyph test vector, clear signing (a known tool shows the parsed fields, a lying title can't change the verb, object or target, the Prime computes the hash, an unknown tool gets the raw view and high impact, bad JSON and bad fields are rejected, v1 and extra request fields are refused), QR size, the compact reply (round trip, every single-bit tamper fails, wrong pinned key, wrong request hash, id or kid, 78-byte payload and QR version 5, base45 against RFC 9285, a fixed test vector), and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set from the parsed action). Pending-pairing tests check that nothing is saved without Codes match. Pairing tests cover the offer and answer roundtrip, a forged offer signature, a far-future expiry, name checks, the pairing code (same both ways, changes if either key changes) and agent-side pinning (a reply from any other app key fails). Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed). The host tests also include the cross tests with the Python agent library (`host-tests/src/lib.rs`).
 - `docs/colorblind.md`: the palette check behind the colorblind note.
 - `tools/colorblind.py`: re-runs that check (needs numpy). `--old` shows the previous palette.
 - `agent/`: the agent-side library and `pa` CLI (see *Agent CLI*).

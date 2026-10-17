@@ -256,7 +256,7 @@ def action_view(action) -> ActionView:
             raise ProtocolError("merge head must be a 40-char lowercase commit SHA")
         if pr == 0:
             raise ProtocolError("merge pr must be a positive number")
-        return ActionView(tool, "Merge", f"PR #{pr}", m["repo"], f"{m['method']} merge at {head[:7]}")
+        return ActionView(tool, "Merge", f"PR #{pr}", m["repo"], f"{m['method']} · head {head[:7]}")
     return ActionView(tool)
 
 

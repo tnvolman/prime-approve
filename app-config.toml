@@ -29,7 +29,7 @@ template = ["gui-app", "fs-generic"]
 id = "prime-approve-request"
 priority = 4
 id-localizations = { en = "Prime Approve request" }
-sub-rules = { req = { QR = { regex-pattern = "^primeapprove:v1:", max-len = 800 } } }
+sub-rules = { req = { QR = { regex-pattern = "^primeapprove:v2:", max-len = 800 } } }
 
 [[qr-match-rules]]
 id = "prime-approve-pair"

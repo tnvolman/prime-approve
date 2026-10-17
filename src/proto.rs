@@ -232,7 +232,7 @@ pub fn action_view(action: &str) -> Result<ActionView, &'static str> {
             if !matches!(m.method.as_str(), "merge" | "squash" | "rebase") { return Err("merge method must be merge, squash or rebase"); }
             if m.head.len() != 40 || !m.head.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) { return Err("merge head must be a 40-char lowercase commit SHA"); }
             if m.pr == 0 { return Err("merge pr must be a positive number"); }
-            Ok(ActionView::Known { verb: "Merge", object: format!("PR #{}", m.pr), target: m.repo, detail: format!("{} merge at {}", m.method, &m.head[..7]) })
+            Ok(ActionView::Known { verb: "Merge", object: format!("PR #{}", m.pr), target: m.repo, detail: format!("{} · head {}", m.method, &m.head[..7]) })
         }
         _ => Ok(ActionView::Unknown { tool: tool.to_string() }),
     }
@@ -579,7 +579,7 @@ mod tests {
         assert!(qr.len() <= 650, "demo request is {} bytes", qr.len());
         let agents = [Agent::new("Cos (demo agent)", sk.verifying_key())];
         let (r, view, _) = decode_request(&qr, &agents).expect("valid");
-        assert_eq!(view, ActionView::Known { verb: "Merge", object: "PR #2".into(), target: "tnvolman/typewright-website-audit".into(), detail: "squash merge at 33393c6".into() });
+        assert_eq!(view, ActionView::Known { verb: "Merge", object: "PR #2".into(), target: "tnvolman/typewright-website-audit".into(), detail: "squash · head 33393c6".into() });
         assert_eq!(summary_line(&view).as_deref(), Some("Merge → PR #2 → tnvolman/typewright-website-audit"));
         assert!(is_elevated(&view));
         assert_eq!(r.hash(), DEMO_HASH, "the Prime computes the hash from the action bytes");

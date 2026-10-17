@@ -17,7 +17,7 @@ When the Prime shows a request inside the bordered panel and the person slides t
 ## What the Prime does not prove
 
 - **That the action is safe.** The Prime shows what it was sent.
-- **That the agent's summary matches the action,** until the Prime reads the action itself (planned). Until then the summary line is agent-supplied, limited to a fixed list of action words and short checked fields.
+- **That an unknown action is what it looks like.** Since v0.5 the Prime reads the action bytes itself and builds the summary line for known tools (`github.merge_pull_request`). Anything else is shown raw, marked "Unrecognized action, read carefully" and high impact; the person has to read it. The agent's title and details are still just claims ("Agent says").
 - **That the approval will be honored.** Whatever holds the credential decides that. If the agent holds it, a compromised agent can skip the approval entirely.
 - **Who was holding the device.** Third-party KeyOS apps can't ask for the PIN again, so an unlocked, unattended Prime can approve.
 
@@ -25,7 +25,7 @@ When the Prime shows a request inside the bordered panel and the person slides t
 
 | Component | Trusted for | Not trusted for |
 | --- | --- | --- |
-| Passport Prime + Prime Approve | Showing the request as received, checking the signature, signing the decision | Knowing what the action really does (until clear-signing lands) |
+| Passport Prime + Prime Approve | Showing the request as received, checking the signature, signing the decision | Knowing what an unknown tool's action really does (shown raw), or what a known tool does beyond its parsed fields |
 | Agent | Proposing actions | Describing its own action honestly, enforcing its own approval |
 | Laptop showing the QR | Carrying bytes | Anything else; it may be compromised |
 | Gate (planned) | Holding the credential, checking the reply, pinning the exact commit | Nothing the agent tells it |
@@ -39,9 +39,9 @@ When the Prime shows a request inside the bordered panel and the person slides t
 | Replay of an old approval | Blocked by the agent or gate | Single-use IDs and expiry enforced where the credential lives; Prime also remembers 512 answered IDs |
 | Far-future expiry | Blocked | Reject expiry more than 10 minutes out |
 | Hidden or look-alike text | Blocked | Allow only printable ASCII (plus newline in details) |
-| Agent hides risk | Blocked | "High impact" set from the action word, not by the agent |
+| Agent hides risk | Blocked | "High impact" set by the Prime from the parsed action (always for unknown tools), never by the agent |
 | Public demo key trusted on a device | Blocked | Demo key behind a build flag, off by default, with a visible warning |
-| Agent describes one action and hashes another | Open | Prime parses the action and computes the hash (clear-signing) |
+| Agent describes one action and hashes another | Blocked | Prime parses known actions and computes the hash; unknown actions shown raw and marked high impact |
 | Compromised agent skips approval | Open | Gate on a separate machine holds the credential; GitHub enforces via required check or deployment protection rule |
 | Approver doesn't compare codes carefully | Partly mitigated | Action code plus shape row; clear-signing reduces reliance on comparison |
 | Unattended unlocked Prime | Open | Short expiry; ask Foundation about a KeyOS-drawn confirmation for high-impact approvals |

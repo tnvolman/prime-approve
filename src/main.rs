@@ -37,7 +37,8 @@ const DEMO_DETAILS: &str = "Squash merge at 33393c6.\n10 files changed.";
 // Security demo buttons (tampered, replay, hidden text) need a demo build AND a debug build.
 const SHOW_DEV: bool = DEMO && cfg!(debug_assertions);
 
-/// Only the title, agent, decision and time are kept. Details are never stored.
+/// Only what the Prime showed (parsed summary or "Unrecognized: tool"), agent, decision and time are kept.
+/// Agent titles and details are never stored.
 #[derive(Serialize, Deserialize, Clone)]
 struct Decision {
     title: String,
@@ -71,6 +72,8 @@ struct App {
     current: Option<Request>,
     /// Paired (local) name of the agent that signed `current`.
     current_agent: String,
+    /// What the Prime showed for `current` (parsed summary, or "Unrecognized: tool"); kept in Recent.
+    current_label: String,
     /// Key of the agent that signed `current` (offered for unpairing after "Don't recognize this").
     current_key: Option<VerifyingKey>,
     /// Agent key waiting on the pair-confirm screen.
@@ -182,7 +185,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         #[cfg(feature = "demo")]
         demo_agent,
         state, current: None, current_agent: String::new(), current_key: None, last_good_qr: None, pending_reply: None,
-        pending_pair: None, pair_answer: None, unpair_target: None, unpair_return: 0,
+        pending_pair: None, pair_answer: None, unpair_target: None, unpair_return: 0, current_label: String::new(),
     }));
     rebuild_agents(&mut app.borrow_mut());
 
@@ -236,27 +239,46 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let mut a = app.borrow_mut();
             // Show the PAIRED name (set locally at pairing), never the agent-supplied `agent` string,
             // because the band sits inside the trusted frame.
-            let res = decode_request(&qr, &a.agents).map(|(r, ag)| (r, ag.name.clone(), ag.key)).and_then(|(r, name, key)| {
+            let res = decode_request(&qr, &a.agents).map(|(r, v, ag)| (r, v, ag.name.clone(), ag.key)).and_then(|(r, v, name, key)| {
                 if a.state.seen.contains(&r.id) { return Err(Reject::AlreadyUsed); }
                 if let Some(now) = now_secs() { check_time(&r, now)?; }
-                Ok((r, name, key))
+                Ok((r, v, name, key))
             });
             match res {
-                Ok((r, paired_name, key)) => {
+                Ok((r, view, paired_name, key)) => {
                     let exp = match now_secs() { Some(now) => { let l = r.exp - now; format!("Expires in {}:{:02}", l / 60, l % 60) } None => "Expiry checked by agent".into() };
                     ui.set_agent_name(paired_name.clone().into());
-                    ui.set_summary_line(summary_line(&r).unwrap_or_default().into());
-                    ui.set_elevated(is_elevated(&r));
+                    // The band, verb, object, target and high-impact flag come only from the parsed action.
+                    // The agent's title and details are shown smaller, under "Agent says".
+                    let hash = r.hash();
+                    let label = match &view {
+                        ActionView::Known { detail, .. } => {
+                            ui.set_unknown_action(false);
+                            ui.set_raw_action("".into());
+                            ui.set_detail_line(detail.clone().into());
+                            summary_line(&view).unwrap_or_default()
+                        }
+                        ActionView::Unknown { tool } => {
+                            ui.set_unknown_action(true);
+                            ui.set_raw_action(wrap_raw(&r.action, 40).into());
+                            ui.set_detail_line("Not a known action: read it above".into());
+                            let t: String = tool.chars().take(36).collect();
+                            format!("Unrecognized: {t}{}", if tool.chars().count() > 36 { "…" } else { "" })
+                        }
+                    };
+                    ui.set_summary_line(label.clone().into());
+                    ui.set_elevated(is_elevated(&view));
                     ui.set_req_title(r.title.clone().into());
                     ui.set_req_details(r.details.clone().into());
-                    ui.set_action_code(action_code(&r.hash).into());
-                    let g: Vec<Glyph> = glyphs(&r.hash).into_iter().map(|(c, sh)| { let (r_, g_, b_) = GLYPH_RGB[c as usize]; Glyph { color: slint::Color::from_rgb_u8(r_, g_, b_), shape: sh as i32 } }).collect();
+                    ui.set_action_code(action_code(&hash).into());
+                    let g: Vec<Glyph> = glyphs(&hash).into_iter().map(|(c, sh)| { let (r_, g_, b_) = GLYPH_RGB[c as usize]; Glyph { color: slint::Color::from_rgb_u8(r_, g_, b_), shape: sh as i32 } }).collect();
                     ui.set_glyphs(slint::ModelRc::new(slint::VecModel::from(g)));
                     ui.set_expires_line(exp.into());
                     ui.set_read_to_end(false);
                     a.last_good_qr = Some(qr);
                     a.current = Some(r);
                     a.current_agent = paired_name;
+                    a.current_label = label;
                     a.current_key = Some(key);
                     ui.set_page(1);
                 }
@@ -377,12 +399,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     agent: DEMO_AGENT.into(),
                     title: title.into(),
                     details: DEMO_DETAILS.into(),
-                    risk: "elevated".into(),
-                    hash: hex::encode(Sha256::digest(DEMO_ACTION)),
+                    action: std::str::from_utf8(DEMO_ACTION).expect("ASCII").into(),
                     exp: now_secs().unwrap_or(0) + 600,
-                    verb: Some("Merge".into()),
-                    object: Some("PR #2".into()),
-                    target: Some("typewright-website-audit".into()),
                 };
                 encode_request(&req, &a.demo_agent)
             }
@@ -434,12 +452,13 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let agent = std::mem::take(&mut a.current_agent);
             a.unpair_target = a.current_key.take();
             a.unpair_return = 2;
-            a.state.recent.push(Decision { title: req.title.clone(), agent, approved: approve, at: now_secs().unwrap_or(0) });
+            let label = std::mem::take(&mut a.current_label);
+            a.state.recent.push(Decision { title: label, agent, approved: approve, at: now_secs().unwrap_or(0) });
             if a.state.recent.len() > MAX_RECENT { a.state.recent.remove(0); }
             save(&cx, &a.state);
             let Some(app_key) = a.app_key.clone() else { return false };
             let reply = encode_reply(&req, approve, reason, &app_key, now_secs().unwrap_or(0));
-            let ok = verify_reply(&reply, &app_key.verifying_key(), &req.id, &req.kid, &req.hash);
+            let ok = verify_reply(&reply, &app_key.verifying_key(), &req.id, &req.kid, &req.hash());
             log::info!("reply {} bytes, decision={}, reason={reason:?}, agent-side verify(approve)={ok}", reply.len(), if approve {"approve"} else {"deny"});
             // Compact reply: medium error correction, drawn across the full screen width for a webcam.
             let (img, info) = qr_image(&reply, qrcodegen::QrCodeEcc::Medium, SCREEN_W);

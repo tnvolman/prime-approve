@@ -100,6 +100,10 @@ export component AppWindow inherits Window {
     in property <string> action-code: "";
     // App-built from the structured verb/object/target fields; "" when the request has none.
     in property <string> summary-line: "";
+    // Item 13: built by the Prime from the parsed action, never from agent text.
+    in property <string> detail-line: "";
+    in property <bool> unknown-action: false;
+    in property <string> raw-action: "";
     in property <[Glyph]> glyphs: [];
     in property <string> expires-line: "";
     in-out property <bool> read-to-end: false;
@@ -229,8 +233,17 @@ export component AppWindow inherits Window {
                 body := VerticalLayout {
                     width: fl.width;
                     spacing: Theme.spacing-sm;
-                    Text { text: root.req-title; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; wrap: word-wrap; }
-                    Body { text: root.req-details; }
+                    if root.unknown-action: Rectangle {
+                        height: 34px; border-radius: 8px; background: #facc15;
+                        Text { text: "UNRECOGNIZED ACTION · READ CAREFULLY"; color: #1c1917; horizontal-alignment: center; vertical-alignment: center;
+                            font-family: Theme.font-primary; font-size: Theme.font-size-caption; font-weight: Theme.font-weight-bold; letter-spacing: 1px; }
+                    }
+                    if root.unknown-action: Label { text: "THE ACTION, EXACTLY AS SIGNED"; }
+                    if root.unknown-action: Text { text: root.raw-action; wrap: char-wrap; color: Theme.palette-foreground;
+                        font-family: Theme.font-primary; font-size: Theme.font-size-label; }
+                    if root.req-title != "" || root.req-details != "": Label { text: "AGENT SAYS"; }
+                    if root.req-title != "": Text { text: root.req-title; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-body; font-weight: Theme.font-weight-semibold; wrap: word-wrap; }
+                    if root.req-details != "": Body { text: root.req-details; color: Theme.palette-muted; }
                     Label { text: "END OF REQUEST"; horizontal-alignment: center; }
                 }
             }
@@ -240,6 +253,10 @@ export component AppWindow inherits Window {
                     if root.summary-line != "": Text {
                         text: root.summary-line; horizontal-alignment: center; wrap: word-wrap;
                         color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-body; font-weight: Theme.font-weight-semibold;
+                    }
+                    if root.detail-line != "": Text {
+                        text: root.detail-line; horizontal-alignment: center; wrap: word-wrap;
+                        color: root.unknown-action ? Brand.amber : Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label;
                     }
                     if root.summary-line != "": Rectangle { height: 1px; background: Theme.palette-muted.transparentize(0.7); }
                     Label { text: "ACTION CODE"; horizontal-alignment: center; }
@@ -334,7 +351,7 @@ export component AppWindow inherits Window {
             Text { text: root.pair-repair ? "Pair this agent again?" : "Pair this agent?"; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; horizontal-alignment: center; }
             PairCode { code: root.pair-code; }
             Text { text: "Agent key " + root.pair-fp; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; horizontal-alignment: center; }
-            Body { text: "Pair only if your agent shows this same code."; horizontal-alignment: center; font-weight: Theme.font-weight-semibold; }
+            Body { text: "Tap Pair, then compare this code with your agent on the next screen."; horizontal-alignment: center; font-weight: Theme.font-weight-semibold; }
             Label { text: "NAME THIS AGENT"; }
             Input {
                 width: 100%;

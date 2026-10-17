@@ -4,12 +4,12 @@
   {
    "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"tnvolman/typewright-website-audit\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
    "expect": "Merge \u2192 PR #2 \u2192 tnvolman/typewright-website-audit",
-   "detail": "squash merge at 33393c6"
+   "detail": "squash · head 33393c6"
   },
   {
    "action": "{\n \"tool\": \"github.merge_pull_request\",\n \"repo\": \"a/b\", \"pr\": 2,\n \"method\": \"rebase\", \"head\": \"33393c61b3e595bfb83bb9b909e280b2f40f0976\"\n}",
    "expect": "Merge \u2192 PR #2 \u2192 a/b",
-   "detail": "rebase merge at 33393c6"
+   "detail": "rebase · head 33393c6"
   },
   {
    "action": "{\"tool\":\"github.delete_repo\",\"repo\":\"tnvolman/typewright-website-audit\"}",
