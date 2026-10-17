@@ -20,6 +20,8 @@ security::use_api!();
 const STATE_FILE: &str = "state.json";
 const MAX_SEEN: usize = 512;
 const MAX_RECENT: usize = 10;
+/// Prime screen width in px; the reply QR is drawn across all of it.
+const SCREEN_W: i32 = 480;
 /// Demo mode: built only with `--features demo`. It pairs a demo agent whose private key is public
 /// (anyone can sign as it), so a demo build shows a "Demo key, not secure" banner on every screen.
 /// A default build has no demo key, no demo agent and no demo buttons.
@@ -105,13 +107,13 @@ fn demo_agent_key() -> SigningKey {
     SigningKey::from_bytes(&seed)
 }
 
-fn qr_image(data: &str) -> (slint::Image, String) {
+/// Renders a QR as a pixel-exact image `target` px wide or less, with a 2-module quiet zone.
+fn qr_image(data: &str, ecc: qrcodegen::QrCodeEcc, target: i32) -> (slint::Image, String) {
     use qrcodegen::{QrCode, QrCodeEcc};
-    // Low error correction: fewer, larger modules, which are easier for a camera to read off a screen.
-    let qr = QrCode::encode_text(data, QrCodeEcc::Low).expect("fits in a QR");
+    let qr = QrCode::encode_text(data, ecc).expect("fits in a QR");
     let border = 2;
     let n = qr.size() + border * 2;
-    let scale = (284 / n).max(1);
+    let scale = (target / n).max(1);
     let px = (n * scale) as u32;
     let mut buf = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(px, px);
     let w = px as usize;
@@ -120,7 +122,8 @@ fn qr_image(data: &str) -> (slint::Image, String) {
         let v = if qr.get_module(x, y) { 0 } else { 255 };
         *p = slint::Rgb8Pixel { r: v, g: v, b: v };
     }
-    let info = format!("{} bytes · QR version {} · low error correction", data.len(), qr.version().value());
+    let level = match ecc { QrCodeEcc::Low => "low", QrCodeEcc::Medium => "medium", QrCodeEcc::Quartile => "quartile", QrCodeEcc::High => "high" };
+    let info = format!("{} chars · QR version {} ({}×{}) · {level} error correction", data.len(), qr.version().value(), qr.size(), qr.size());
     (slint::Image::from_rgb8(buf), info)
 }
 
@@ -428,10 +431,11 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             if a.state.recent.len() > MAX_RECENT { a.state.recent.remove(0); }
             save(&cx, &a.state);
             let Some(app_key) = a.app_key.clone() else { return false };
-            let reply = encode_reply(&req, approve, reason, &app_key);
+            let reply = encode_reply(&req, approve, reason, &app_key, now_secs().unwrap_or(0));
             let ok = verify_reply(&reply, &app_key.verifying_key(), &req.id, &req.kid, &req.hash);
             log::info!("reply {} bytes, decision={}, reason={reason:?}, agent-side verify(approve)={ok}", reply.len(), if approve {"approve"} else {"deny"});
-            let (img, info) = qr_image(&reply);
+            // Compact reply: medium error correction, drawn across the full screen width for a webcam.
+            let (img, info) = qr_image(&reply, qrcodegen::QrCodeEcc::Medium, SCREEN_W);
             ui.set_reply_qr(img);
             ui.set_qr_line(info.into());
             ui.set_approved(approve);
@@ -502,7 +506,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let reply = encode_paired_reply(&pk, &app_key);
         let ok = verify_paired_reply(&reply, &pk) == Some(app_key.verifying_key());
         log::info!("pairing pending (not saved) for {}, reply {} bytes, agent-side verify={ok}", fingerprint(&pk), reply.len());
-        let (img, info) = qr_image(&reply);
+        let (img, info) = qr_image(&reply, qrcodegen::QrCodeEcc::Low, 284);
         ui.set_reply_qr(img);
         ui.set_qr_line(info.into());
         ui.set_agent_name(name.clone().into());

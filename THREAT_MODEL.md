@@ -50,9 +50,9 @@ When the Prime shows a request inside the bordered panel and the person slides t
 
 ## Rules for anyone integrating
 
-1. Pin the Prime's public key at pairing. Never trust the key a reply carries.
+1. Pin the Prime's public key at pairing, only after your own user confirms the pairing codes match. Replies carry no key; verify every one against the pinned key.
 2. Enforce single use and expiry where the credential lives.
-3. Recompute the action hash from the exact action you will run, including the commit SHA, and compare it with the reply.
+3. Recompute the action hash from the exact action you will run, including the commit SHA, and verify the reply's signature over it. The reply never carries the full hash; it signs it, so only the agent's own recomputed hash verifies.
 4. Don't let the agent hold the credential it is asking approval to use.
 
 ## Open questions for Foundation
