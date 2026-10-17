@@ -155,3 +155,25 @@ def test_request_refuses_what_the_prime_would_reject(home, capsys, monkeypatch):
     for args in bad:
         assert run(capsys, monkeypatch, "request", *args)[0] == 2, args
     assert not list((home / "pending").glob("*.json")) if (home / "pending").exists() else True
+
+
+def test_pair_accept_replacing_a_pinned_prime_needs_replace(home, capsys, monkeypatch):
+    use_test_agent(home)
+    other = signing_key(bytes([8]) * 32)
+    store.pin_prime(public_bytes(other), "old")
+    pinned = lambda: json.loads((home / "prime.json").read_text())["app_pk"]
+    for answer in ["y", "yes", "", "Replace", "replace it"]:
+        code, out = run(capsys, monkeypatch, "pair-accept", RUST["paired_reply"], stdin=answer + "\n")
+        assert code == 1 and "This replaces the Prime you trust" in out, answer
+        assert pinned() == public_bytes(other).hex(), "old Prime still pinned"
+    from primeapprove.protocol import fingerprint
+    assert fingerprint(public_bytes(other)) in out and fingerprint(bytes.fromhex(RUST["app_pk"])) in out
+    code, out = run(capsys, monkeypatch, "pair-accept", RUST["paired_reply"], stdin="replace\n")
+    assert code == 0 and pinned() == RUST["app_pk"]
+
+
+def test_pair_accept_same_prime_again_is_a_plain_yes(home, capsys, monkeypatch):
+    use_test_agent(home)
+    store.pin_prime(bytes.fromhex(RUST["app_pk"]), "same")
+    code, out = run(capsys, monkeypatch, "pair-accept", RUST["paired_reply"], stdin="y\n")
+    assert code == 0 and "replaces" not in out and "[y/N]" in out

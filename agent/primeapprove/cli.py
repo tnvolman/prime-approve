@@ -51,11 +51,24 @@ def cmd_pair_accept(a) -> int:
     code = pairing_code(pk, app_pk)
     print(f"The Prime's answer is validly signed. Prime key {fingerprint(app_pk)}")
     print(f"\n    PAIRING CODE  {code}\n")
-    sys.stdout.write("Does the Prime show the same code? [y/N] ")
-    sys.stdout.flush()
-    answer = sys.stdin.readline().strip().lower()
-    if answer not in ("y", "yes"):
-        print("Not pinned. Tap Don't match on the Prime too, so it saves nothing either.")
+    try:
+        old = store.pinned_prime()
+    except ProtocolError:
+        old = None
+    if old is not None and old != app_pk:
+        # Replacing the trusted Prime is what an attacker would want; make it deliberate.
+        print("WARNING: This replaces the Prime you trust.")
+        print(f"    pinned now  {fingerprint(old)}")
+        print(f"    new Prime   {fingerprint(app_pk)}")
+        sys.stdout.write("If the Prime shows the same code and you mean to switch, type 'replace': ")
+        sys.stdout.flush()
+        ok = sys.stdin.readline().strip() == "replace"
+    else:
+        sys.stdout.write("Does the Prime show the same code? [y/N] ")
+        sys.stdout.flush()
+        ok = sys.stdin.readline().strip().lower() in ("y", "yes")
+    if not ok:
+        print("Not pinned" + (" (the Prime you trust is unchanged)" if old else "") + ". Tap Don't match on the Prime too, so it saves nothing either.")
         return 1
     path = store.pin_prime(app_pk, code)
     print(f"Pinned the Prime's key in {path}. Now tap Codes match on the Prime.")
