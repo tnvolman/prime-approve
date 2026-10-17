@@ -2,14 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const REQ_PREFIX: &str = "primeapprove:v1:";
-pub const RES_PREFIX: &str = "primeapprove:v1r:";
+/// Compact reply (item 11): `PA1:` + base45(packed bytes), all QR alphanumeric-mode characters.
+pub const REPLY_PREFIX: &str = "PA1:";
 const REQ_DOMAIN: &[u8] = b"primeapprove-req-v1\n";
-const RES_DOMAIN: &[u8] = b"primeapprove-res-v1\n";
+const REPLY_DOMAIN: &[u8] = b"primeapprove-reply-v1\n";
+pub const REPLY_VERSION: u8 = 1;
+/// Packed reply: version(1) | decision(1) | request id prefix(8) | time(4, u32 BE unix secs) | sig(64).
+pub const REPLY_LEN: usize = 1 + 1 + 8 + 4 + 64;
 /// Pairing: the agent's offer (signed by the agent key it wants paired, proving it holds that key)
 /// and the Prime's answer (signed by the app key the agent must pin).
 pub const PAIR_PREFIX: &str = "primeapprove:pair:v1:";
@@ -63,19 +67,24 @@ pub struct Request {
     pub target: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Reply {
-    pub id: String,
-    pub kid: String,
-    pub decision: String,
-    pub hash: String,
-    pub app: String,
-    /// Deny only, optional: "wrong_action", "not_now" or "unrecognized".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
 pub const DENY_REASONS: [&str; 3] = ["wrong_action", "not_now", "unrecognized"];
+
+/// Decision byte. A deny reason is folded into it, so every reply is the same length.
+pub const DECISION_APPROVE: u8 = 1;
+pub const DECISION_DENY: u8 = 2;
+/// 3, 4, 5 = deny with DENY_REASONS[0], [1], [2].
+const DECISION_DENY_REASON0: u8 = 3;
+
+/// What the agent learns from a reply that verified.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplyInfo {
+    pub approved: bool,
+    /// Deny only: one of DENY_REASONS, or None.
+    pub reason: Option<&'static str>,
+    /// When the Prime signed it, unix seconds (0 if the Prime's clock was unknown). Signed, informational;
+    /// the agent still enforces its own expiry.
+    pub at: u32,
+}
 
 pub struct Agent {
     pub name: String,
@@ -265,31 +274,93 @@ pub fn decode_request<'a>(qr: &str, agents: &'a [Agent]) -> Result<(Request, &'a
     Ok((req, agent))
 }
 
-pub fn encode_reply(req: &Request, approve: bool, reason: Option<&str>, app: &SigningKey) -> String {
-    let reason = if approve { None } else { reason.filter(|r| DENY_REASONS.contains(r)).map(String::from) };
-    let reply = Reply {
-        id: req.id.clone(),
-        kid: req.kid.clone(),
-        decision: if approve { "approve" } else { "deny" }.into(),
-        hash: req.hash.clone(),
-        app: hex::encode(app.verifying_key().as_bytes()),
-        reason,
-    };
-    let body = serde_json::to_vec(&reply).unwrap();
-    let sig = app.sign(&[RES_DOMAIN, &body].concat());
-    format!("{RES_PREFIX}{}.{}", B64.encode(&body), B64.encode(sig.to_bytes()))
+// ---------------------------------------------------------------- base45 (RFC 9285)
+
+const B45: &[u8; 45] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+
+/// RFC 9285 base45. Every output character is in the QR alphanumeric set, so the QR uses
+/// alphanumeric mode (5.5 bits per character).
+pub fn base45_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() / 2 * 3 + 2);
+    for c in data.chunks(2) {
+        let (mut n, k) = if c.len() == 2 { (c[0] as u32 * 256 + c[1] as u32, 3) } else { (c[0] as u32, 2) };
+        for _ in 0..k { out.push(B45[(n % 45) as usize] as char); n /= 45; }
+    }
+    out
 }
 
-/// Agent-side check: what a real agent must run before acting.
-/// The agent must ALSO enforce its own expiry and treat each request id as single-use.
+pub fn base45_decode(s: &str) -> Option<Vec<u8>> {
+    let v: Vec<u32> = s.bytes().map(|ch| B45.iter().position(|&x| x == ch).map(|i| i as u32)).collect::<Option<_>>()?;
+    if v.len() % 3 == 1 { return None; }
+    let mut out = Vec::with_capacity(v.len() / 3 * 2 + 1);
+    for c in v.chunks(3) {
+        if c.len() == 3 {
+            let n = c[0] + c[1] * 45 + c[2] * 45 * 45;
+            if n > 0xFFFF { return None; }
+            out.extend_from_slice(&[(n >> 8) as u8, n as u8]);
+        } else {
+            let n = c[0] + c[1] * 45;
+            if n > 0xFF { return None; }
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------- reply
+
+/// The bytes the Prime signs. The FULL request id, the agent's kid and the FULL action hash are bound
+/// here even though the QR carries only an 8-byte id prefix: the agent recomputes this message from
+/// the request it holds, so a reply only verifies for that exact request and action.
+fn reply_message(version: u8, decision: u8, id: &[u8; 16], kid: &[u8; 8], hash: &[u8; 32], at: u32) -> Vec<u8> {
+    [REPLY_DOMAIN, &[version, decision], id, kid, hash, &at.to_be_bytes()].concat()
+}
+
+fn fixed<const N: usize>(hex_str: &str) -> Option<[u8; N]> {
+    hex::decode(hex_str).ok()?.try_into().ok()
+}
+
+/// Prime side: the signed reply QR text, `PA1:` + base45(78 bytes) = 121 characters.
+/// `at` is the Prime's clock (unix seconds, 0 if unknown). A reason is only kept on a deny,
+/// and only if it is one of DENY_REASONS.
+pub fn encode_reply(req: &Request, approve: bool, reason: Option<&str>, app: &SigningKey, at: u64) -> String {
+    let decision = if approve {
+        DECISION_APPROVE
+    } else {
+        reason.and_then(|r| DENY_REASONS.iter().position(|x| *x == r)).map_or(DECISION_DENY, |i| DECISION_DENY_REASON0 + i as u8)
+    };
+    // decode_request already checked id is 32 hex chars, hash 64 and kid matches the agent key.
+    let (id, kid, hash) = (fixed::<16>(&req.id).expect("id"), fixed::<8>(&req.kid).expect("kid"), fixed::<32>(&req.hash).expect("hash"));
+    let at = u32::try_from(at).unwrap_or(0);
+    let sig = app.sign(&reply_message(REPLY_VERSION, decision, &id, &kid, &hash, at));
+    let mut packed = Vec::with_capacity(REPLY_LEN);
+    packed.extend_from_slice(&[REPLY_VERSION, decision]);
+    packed.extend_from_slice(&id[..8]);
+    packed.extend_from_slice(&at.to_be_bytes());
+    packed.extend_from_slice(&sig.to_bytes());
+    format!("{REPLY_PREFIX}{}", base45_encode(&packed))
+}
+
+/// Agent side: checks a reply against the PINNED Prime key and the request the agent issued
+/// (its id, its own kid and the action hash it is about to run). Returns the decision only if
+/// everything matches. The agent must ALSO enforce its own expiry and treat each id as single-use.
+pub fn decode_reply(qr: &str, app_pk: &VerifyingKey, want_id: &str, want_kid: &str, want_hash: &str) -> Option<ReplyInfo> {
+    let b = base45_decode(qr.strip_prefix(REPLY_PREFIX)?)?;
+    if b.len() != REPLY_LEN || b[0] != REPLY_VERSION { return None; }
+    let (id, kid, hash) = (fixed::<16>(want_id)?, fixed::<8>(want_kid)?, fixed::<32>(want_hash)?);
+    if b[2..10] != id[..8] { return None; }
+    let decision = b[1];
+    if !(DECISION_APPROVE..DECISION_DENY_REASON0 + DENY_REASONS.len() as u8).contains(&decision) { return None; }
+    let at = u32::from_be_bytes(b[10..14].try_into().ok()?);
+    let sig = Signature::from_slice(&b[14..]).ok()?;
+    app_pk.verify_strict(&reply_message(b[0], decision, &id, &kid, &hash, at), &sig).ok()?;
+    let reason = (decision >= DECISION_DENY_REASON0).then(|| DENY_REASONS[(decision - DECISION_DENY_REASON0) as usize]);
+    Some(ReplyInfo { approved: decision == DECISION_APPROVE, reason, at })
+}
+
+/// Agent-side check: what a real agent must run before acting. True only for a valid APPROVE.
 pub fn verify_reply(qr: &str, app_pk: &VerifyingKey, want_id: &str, want_kid: &str, want_hash: &str) -> bool {
-    let Some(rest) = qr.strip_prefix(RES_PREFIX) else { return false };
-    let Some((b, s)) = rest.split_once('.') else { return false };
-    let (Ok(body), Ok(sig)) = (B64.decode(b), B64.decode(s)) else { return false };
-    let Ok(sig) = Signature::from_slice(&sig) else { return false };
-    if app_pk.verify_strict(&[RES_DOMAIN, &body].concat(), &sig).is_err() { return false; }
-    let Ok(r) = serde_json::from_slice::<Reply>(&body) else { return false };
-    r.id == want_id && r.kid == want_kid && r.hash == want_hash && r.decision == "approve"
+    decode_reply(qr, app_pk, want_id, want_kid, want_hash).is_some_and(|r| r.approved)
 }
 
 // ---------------------------------------------------------------- pairing
@@ -492,18 +563,134 @@ mod tests {
         }
     }
 
+    const AT: u64 = 1_800_000_000;
+
     #[test]
     fn approve_reply_verifies_and_deny_does_not() {
         let (req, _) = demo_req(None, None, None);
         let app = SigningKey::from_bytes(&[7u8; 32]);
-        let ok = encode_reply(&req, true, Some("not_now"), &app);
-        assert!(verify_reply(&ok, &app.verifying_key(), &req.id, &req.kid, &req.hash));
-        let body = |q: &str| String::from_utf8(B64.decode(q.strip_prefix(RES_PREFIX).unwrap().split_once('.').unwrap().0).unwrap()).unwrap();
-        assert!(!body(&ok).contains("reason")); // never on approve
-        let no = encode_reply(&req, false, Some("wrong_action"), &app);
-        assert!(body(&no).contains(r#""reason":"wrong_action""#));
-        assert!(!verify_reply(&no, &app.verifying_key(), &req.id, &req.kid, &req.hash));
-        assert!(!verify_reply(&ok, &app.verifying_key(), &req.id, &req.kid, &"0".repeat(64)));
+        let pk = app.verifying_key();
+        let ok = encode_reply(&req, true, Some("not_now"), &app, AT);
+        assert!(verify_reply(&ok, &pk, &req.id, &req.kid, &req.hash));
+        // A reason is never carried on an approve.
+        assert_eq!(decode_reply(&ok, &pk, &req.id, &req.kid, &req.hash), Some(ReplyInfo { approved: true, reason: None, at: AT as u32 }));
+        for (i, r) in DENY_REASONS.iter().enumerate() {
+            let no = encode_reply(&req, false, Some(r), &app, AT);
+            assert_eq!(decode_reply(&no, &pk, &req.id, &req.kid, &req.hash).unwrap().reason, Some(DENY_REASONS[i]));
+            assert!(!verify_reply(&no, &pk, &req.id, &req.kid, &req.hash), "a deny never verifies as approve");
+        }
+        // Unknown reasons are dropped, not signed.
+        let no = encode_reply(&req, false, Some("because"), &app, AT);
+        assert_eq!(decode_reply(&no, &pk, &req.id, &req.kid, &req.hash), Some(ReplyInfo { approved: false, reason: None, at: AT as u32 }));
+    }
+
+    // ---- Compact reply (item 11) ----
+
+    #[test]
+    fn base45_matches_rfc9285() {
+        for (raw, enc) in [(&b"AB"[..], "BB8"), (b"Hello!!", "%69 VD92EX0"), (b"base-45", "UJCLQE7W581"), (b"ietf!", "QED8WEX0"), (b"", "")] {
+            assert_eq!(base45_encode(raw), enc);
+            assert_eq!(base45_decode(enc).as_deref(), Some(raw));
+        }
+        assert_eq!(base45_decode("GGW"), None, "65536 is out of range");
+        assert_eq!(base45_decode("ab"), None, "lowercase is not base45");
+        assert_eq!(base45_decode("A"), None, "dangling character");
+        let all: Vec<u8> = (0..=255).collect();
+        assert_eq!(base45_decode(&base45_encode(&all)).unwrap(), all);
+    }
+
+    #[test]
+    fn compact_reply_roundtrip() {
+        let (req, _) = demo_req(None, None, None);
+        let app = SigningKey::from_bytes(&[7u8; 32]);
+        let qr = encode_reply(&req, true, None, &app, AT);
+        assert!(qr.starts_with(REPLY_PREFIX));
+        // Every character is QR alphanumeric, so the QR uses alphanumeric mode.
+        assert!(qr.bytes().all(|c| B45.contains(&c)), "{qr}");
+        let raw = base45_decode(&qr[REPLY_PREFIX.len()..]).unwrap();
+        assert_eq!(raw.len(), REPLY_LEN);
+        assert_eq!(&raw[..2], &[REPLY_VERSION, DECISION_APPROVE]);
+        assert_eq!(hex::encode(&raw[2..10]), &req.id[..16], "8-byte request id prefix");
+        assert_eq!(u32::from_be_bytes(raw[10..14].try_into().unwrap()), AT as u32);
+        assert!(verify_reply(&qr, &app.verifying_key(), &req.id, &req.kid, &req.hash));
+        // Upper-case hex from the agent is fine too.
+        assert!(verify_reply(&qr, &app.verifying_key(), &req.id.to_uppercase(), &req.kid, &req.hash.to_uppercase()));
+        // Unknown clock signs time 0, and still verifies.
+        let q0 = encode_reply(&req, true, None, &app, 0);
+        assert_eq!(decode_reply(&q0, &app.verifying_key(), &req.id, &req.kid, &req.hash).unwrap().at, 0);
+    }
+
+    /// Fixed test vector for other implementations (tools/decode_reply.py is checked against it).
+    /// App key: SigningKey::from_bytes(&[7; 32]) (a public TEST key). Request: `demo_req`, signed at AT.
+    #[test]
+    fn compact_reply_test_vector() {
+        let (req, _) = demo_req(None, None, None);
+        let app = SigningKey::from_bytes(&[7u8; 32]);
+        let qr = encode_reply(&req, true, None, &app, AT);
+        println!("vector app_pk={} id={} kid={} hash={} reply={qr}", hex::encode(app.verifying_key().as_bytes()), req.id, req.kid, req.hash);
+        assert_eq!(qr, REPLY_VECTOR);
+    }
+    const REPLY_VECTOR: &str = "PA1:W50H00PE4XS8-.CFPDUOQ65F+%N1KSUHI911B:D891NZDPID5VRFZKBHEDAB%W1J9QPKTOSI$6F+8KX.AO5MEC3IQG$A9QIB%UN/R70-F*XC7+DC PAW7";
+
+    #[test]
+    fn compact_reply_tamper_fails() {
+        let (req, _) = demo_req(None, None, None);
+        let app = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = app.verifying_key();
+        let qr = encode_reply(&req, true, None, &app, AT);
+        let raw = base45_decode(&qr[REPLY_PREFIX.len()..]).unwrap();
+        // Flip every bit of every packed byte: none may verify (decision, id prefix, time and sig all bound).
+        for i in 0..raw.len() {
+            for bit in 0..8 {
+                let mut t = raw.clone();
+                t[i] ^= 1 << bit;
+                let q = format!("{REPLY_PREFIX}{}", base45_encode(&t));
+                assert!(decode_reply(&q, &pk, &req.id, &req.kid, &req.hash).is_none(), "byte {i} bit {bit}");
+            }
+        }
+        // A deny can't be turned into an approve by editing the decision byte.
+        let no = encode_reply(&req, false, Some("wrong_action"), &app, AT);
+        let mut t = base45_decode(&no[REPLY_PREFIX.len()..]).unwrap();
+        t[1] = DECISION_APPROVE;
+        assert!(!verify_reply(&format!("{REPLY_PREFIX}{}", base45_encode(&t)), &pk, &req.id, &req.kid, &req.hash));
+        // Truncated, extended, wrong prefix, wrong version, garbage.
+        assert!(!verify_reply(&qr[..qr.len() - 3], &pk, &req.id, &req.kid, &req.hash));
+        assert!(!verify_reply(&format!("{qr}000"), &pk, &req.id, &req.kid, &req.hash));
+        assert!(!verify_reply(&qr.replacen("PA1:", "PA2:", 1), &pk, &req.id, &req.kid, &req.hash));
+        let mut t = raw.clone(); t[0] = 2;
+        assert!(!verify_reply(&format!("{REPLY_PREFIX}{}", base45_encode(&t)), &pk, &req.id, &req.kid, &req.hash));
+        assert!(!verify_reply("PA1:hello", &pk, &req.id, &req.kid, &req.hash));
+    }
+
+    #[test]
+    fn compact_reply_wrong_pinned_key_fails() {
+        let (req, _) = demo_req(None, None, None);
+        let (app, impostor) = (SigningKey::from_bytes(&[7u8; 32]), SigningKey::from_bytes(&[9u8; 32]));
+        let fake = encode_reply(&req, true, None, &impostor, AT);
+        assert!(!verify_reply(&fake, &app.verifying_key(), &req.id, &req.kid, &req.hash));
+        assert!(decode_reply(&fake, &app.verifying_key(), &req.id, &req.kid, &req.hash).is_none());
+    }
+
+    #[test]
+    fn compact_reply_wrong_request_fails() {
+        let (req, _) = demo_req(None, None, None);
+        let app = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = app.verifying_key();
+        let qr = encode_reply(&req, true, None, &app, AT);
+        // Wrong action hash: only the full hash, never sent, is bound in the signature.
+        let other = hex::encode(Sha256::digest(b"some other action"));
+        assert!(!verify_reply(&qr, &pk, &req.id, &req.kid, &other));
+        let mut h = req.hash.clone().into_bytes(); h[63] = if h[63] == b'0' { b'1' } else { b'0' };
+        assert!(!verify_reply(&qr, &pk, &req.id, &req.kid, std::str::from_utf8(&h).unwrap()), "last hash byte changed");
+        // Same 8-byte id prefix, different tail: the full id is signed.
+        let id2 = format!("{}{}", &req.id[..16], "ffffffffffffffff");
+        assert!(!verify_reply(&qr, &pk, &id2, &req.kid, &req.hash));
+        // Different id prefix.
+        assert!(!verify_reply(&qr, &pk, &"0".repeat(32), &req.kid, &req.hash));
+        // Different agent kid.
+        assert!(!verify_reply(&qr, &pk, &req.id, &kid(&agent_sk(3).verifying_key()), &req.hash));
+        // Malformed expectations never verify.
+        assert!(!verify_reply(&qr, &pk, "xyz", &req.kid, &req.hash));
     }
 
     // ---- Review findings (Oct 17, 2026). Each test guards a fix, or pins a known gap. ----
@@ -567,10 +754,18 @@ mod tests {
     fn reply_sizes() {
         let (req, _) = demo_req(None, None, None);
         let app = SigningKey::from_bytes(&[7u8; 32]);
-        let ok = encode_reply(&req, true, None, &app);
-        let no = encode_reply(&req, false, Some("unrecognized"), &app);
-        println!("approve reply {} bytes, deny reply {} bytes", ok.len(), no.len());
-        assert!(ok.len() <= 450 && no.len() <= 480);
+        let ok = encode_reply(&req, true, None, &app, AT);
+        let no = encode_reply(&req, false, Some("unrecognized"), &app, AT);
+        let raw = |q: &str| base45_decode(&q[REPLY_PREFIX.len()..]).unwrap().len();
+        println!("approve reply {} chars ({} bytes packed), deny reply {} chars ({} bytes packed); was 416 and 444", ok.len(), raw(&ok), no.len(), raw(&no));
+        assert!(raw(&ok) <= 90 && raw(&no) <= 90, "packed payload must be <= 90 bytes");
+        assert_eq!((raw(&ok), raw(&no)), (78, 78));
+        assert_eq!((ok.len(), no.len()), (121, 121), "every reply is the same length");
+        // QR size: version 5 (37x37) at medium error correction, alphanumeric mode.
+        for q in [&ok, &no] {
+            let code = qrcodegen::QrCode::encode_text(q, qrcodegen::QrCodeEcc::Medium).unwrap();
+            assert_eq!((code.version().value(), code.size()), (5, 37));
+        }
     }
 
     // ---- Pairing (item 10) ----
@@ -600,9 +795,9 @@ mod tests {
         // After pinning, a reply signed by any other app key must fail.
         let (req, _) = demo_req(None, None, None);
         let impostor = agent_sk(9);
-        let fake = encode_reply(&req, true, None, &impostor);
+        let fake = encode_reply(&req, true, None, &impostor, AT);
         assert!(!verify_reply(&fake, &pinned, &req.id, &req.kid, &req.hash));
-        let real = encode_reply(&req, true, None, &app);
+        let real = encode_reply(&req, true, None, &app, AT);
         assert!(verify_reply(&real, &pinned, &req.id, &req.kid, &req.hash));
     }
 

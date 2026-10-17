@@ -2,11 +2,20 @@
 
 An offline approval app for Foundation Passport Prime (KeyOS). An AI agent asks for permission with a signed QR code; the human reads the exact request on the Prime and approves or denies; the Prime answers with a signed reply QR the agent must verify before acting. No network, no trading.
 
-Status: v0.2 in progress, simulator-tested only. Not yet run on hardware (see *Known items to test on hardware*).
+Status: v0.4 (compact reply) in progress, simulator-tested only. Not yet run on hardware (see *Known items to test on hardware*).
 
 **Read [`THREAT_MODEL.md`](THREAT_MODEL.md) first.** It says what an approval proves and what it doesn't, where the trust boundaries are, and which threats are fixed, planned or open.
 
 ## Screenshots (KeyOS simulator, color-corrected)
+
+**Compact reply (v0.4, October 17, 2026):** the demo request, the approved reply, the deny reasons and a denied reply ("Wrong action"). The reply QR is now 121 characters (version 5, 37×37 modules, medium error correction) and spans the full screen width, with the action code below it.
+
+<p>
+<img src="docs/screenshots/v0.4/review.png" width="140" alt="Demo request review">
+<img src="docs/screenshots/v0.4/approved-reply.png" width="140" alt="Approved: full-width reply QR, version 5, action code below">
+<img src="docs/screenshots/v0.4/deny-reason.png" width="140" alt="Why deny?">
+<img src="docs/screenshots/v0.4/denied-reply.png" width="140" alt="Denied: full-width reply QR">
+</p>
 
 **Pairing (v0.3, October 17, 2026):** a default build with no agent, the pair-confirm screen (pairing code and agent key), naming the agent on the Prime with the on-screen keyboard, the signed answer QR for the agent with **Codes match** and **Don't match** (updated in v0.3.1; the pairing is saved only on Codes match), a relaunch showing the saved pairing, the unpair prompt, and a relaunch after unpairing (Agent 1 stays gone, Build bot stays paired). The demo agent "Cos" is a demo-build-only, in-memory agent.
 
@@ -73,13 +82,27 @@ The Prime rejects a request that is:
 
 It signs nothing when it rejects.
 
-**Reply QR** `primeapprove:v1r:<b64url(json)>.<b64url(sig)>`. The signature covers `"primeapprove-res-v1\n" + json`.
+**Reply QR (v0.4, compact)** `PA1:<base45(78 bytes)>`, always 121 characters. Base45 ([RFC 9285](https://www.rfc-editor.org/rfc/rfc9285)) uses only QR alphanumeric characters (`0-9 A-Z space $ % * + - . / :`), so the QR is drawn in alphanumeric mode. The packed bytes are:
 
-JSON: `{id, kid, decision: "approve"|"deny", hash, app: app public key hex, reason?}`.
+| bytes | field |
+|---|---|
+| 1 | version, `1` |
+| 1 | decision: `1` approve, `2` deny, `3` deny "wrong_action", `4` deny "not_now", `5` deny "unrecognized" |
+| 8 | the first 8 bytes of the request `id` |
+| 4 | time the Prime signed it, unix seconds, big-endian `u32` (`0` if the Prime's clock is unknown). Informational: the agent still enforces its own expiry |
+| 64 | Ed25519 signature by the Prime's app key |
 
-`reason` is optional and only appears on a deny: `"wrong_action"`, `"not_now"` or `"unrecognized"`. It is **never** present on an approve. Any other value is dropped, not signed. If the person chooses "Don't recognize this", the Prime also offers to unpair that agent.
+The signature covers more than is sent:
 
-**QR codes** are drawn with **low error correction**. That gives fewer, larger modules, which a camera reads more easily off a screen. Error correction is there to recover damaged codes, and the signature already catches a bad read.
+    "primeapprove-reply-v1\n" || version || decision || id (all 16 bytes) || kid (8 bytes) || hash (all 32 bytes) || time
+
+The full request id, the agent's `kid` and the full action `hash` are never in the QR. The agent rebuilds the signed message from the request it holds, so a reply only verifies for that exact request, that agent and that exact action. There is no key id: the agent checks against the one Prime key it pinned at pairing. A deny reason is folded into the decision byte, so it is **never** possible on an approve, and an unknown reason is signed as a plain deny. If the person chooses "Don't recognize this", the Prime also offers to unpair that agent.
+
+The old JSON reply (`primeapprove:v1r:`, 416 bytes for an approve and 444 for a deny) is gone; agents must use the compact format.
+
+**QR codes.** The reply is drawn at **medium** error correction across the full 480-pixel screen width: 37 modules plus a 2-module quiet zone, 11 pixels per module, with a little extra white margin, so about 3 modules of quiet zone on each side. The action code stays below it. Request and pairing QRs (shown by the agent) and the pairing answer stay at low error correction.
+
+**Reading a reply on the agent side.** `tools/decode_reply.py photo.png --pubkey <pinned Prime key> --id <request id> --kid <your kid> --hash <action hash>` decodes a photo or screenshot with zbar and verifies it the same way as `verify_reply`. It exits 0 only for a valid approve. `src/proto.rs` has a fixed test vector (`compact_reply_test_vector`) for other implementations.
 
 App key: Ed25519 from HKDF-SHA256 (salt `prime-approve`, ikm = the KeyOS app seed via `GetAppSeed`, info `app key v1`). The app never touches the master seed.
 
@@ -165,7 +188,7 @@ glyphs  = orange circle, yellow ring, vermillion outlined square, orange square,
 
 The action code and the colored shapes help a *person* notice when the request on the Prime isn't the one their agent showed, for example if it was swapped or changed on the way. They are a convenience for spotting that, not the security boundary.
 
-The real protection is on the agent. Before acting, the agent runs `verify_reply`: it checks the reply's signature against the paired app key, and requires that the `id`, `kid` and `hash` match the exact action it's about to run and that `decision == "approve"`. An agent that skips that check isn't protected by any pattern on the screen.
+The real protection is on the agent. Before acting, the agent runs `verify_reply`: it rebuilds the signed message from its own request `id`, its own `kid` and the hash of the exact action it's about to run, checks the reply's signature over that against the pinned app key, and requires the decision to be approve. An agent that skips that check isn't protected by any pattern on the screen.
 
 ## Trusted frame
 
@@ -183,7 +206,7 @@ The slider stays locked until the request has been scrolled to the end. This is 
 
 ## Agent-side check (required)
 
-Before acting, the agent must run the equivalent of `verify_reply`: verify the signature with the paired app public key, then require `id` = the request it issued, `kid` = its own key id, `hash` = the action it is about to run, and `decision == "approve"`. The agent must also enforce its own expiry and treat each request id as single-use.
+Before acting, the agent must run the equivalent of `verify_reply` (or `decode_reply`, which also returns a deny and its reason): check that the reply's 8-byte id prefix matches the request it issued, rebuild the signed message from the full `id`, its own `kid` and the hash of the action it is about to run, verify the signature with the pinned app public key, and require decision `1` (approve). The agent must also enforce its own expiry and treat each request id as single-use.
 
 ## Security note: replay protection lives on the agent
 
@@ -193,16 +216,18 @@ The Prime remembers the last 512 answered request ids so it refuses obvious repl
 
 These are untested until a dev unit arrives:
 
-- **Real-camera QR reading at these densities.** All codes use low error correction:
+- **Real-camera QR reading at these densities.** Request and pairing codes use low error correction, the reply medium:
 
   | payload | bytes | QR version | modules |
   |---|---|---|---|
   | request cap (`MAX_QR`) | 800 | 20 | 97×97 |
   | demo request | 581 | 17 | 85×85 |
-  | approve reply | 416 | 13 | 69×69 |
-  | deny reply with a reason | 444 | 14 | 73×73 |
+  | approve or deny reply (v0.4, medium error correction) | 121 | 5 | 37×37 |
+  | old JSON approve reply (before v0.4) | 416 | 13 | 69×69 |
+  | old JSON deny reply with a reason (before v0.4) | 444 | 14 | 73×73 |
 
   If the Prime camera struggles near 800 bytes, the cap should come down.
+- **A laptop webcam reading the reply off a real Prime.** In simulation, zbar decodes the reply screenshot at full size and downscaled to 50%, 30%, 20% and 15%, with and without blur; the old 416-byte reply decoded at full size and 50% but failed at 50% with blur and at every smaller size. A real webcam test still needs a person: show an approved reply to the webcam, take a photo, and run `tools/decode_reply.py` on it.
 - **Summary fields cost about 90 bytes** of the request budget (the demo is 490 bytes without them, 581 with). Real agents with long titles and details will feel that.
 - **The colored shapes on a real Prime panel.** Brightness, gamut and viewing angle can shift colors from the simulated values.
 
@@ -229,9 +254,10 @@ Change `app-id` in `app-config.toml`. The app's signing key is derived from the 
 
 ## Tests, docs and tools
 
-- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, reply signing and verification, and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set by the verb). Pairing tests cover the offer and answer roundtrip, a forged offer signature, a far-future expiry, name checks, the pairing code (same both ways, changes if either key changes) and agent-side pinning (a reply from any other app key fails). One test, `known_gap_summary_not_bound_to_hash`, deliberately pins the open gap that the summary isn't tied to the hash yet; it gets flipped when the Prime reads the action itself. Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed).
+- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, the compact reply (round trip, every single-bit tamper fails, wrong pinned key, wrong request hash, id or kid, 78-byte payload and QR version 5, base45 against RFC 9285, a fixed test vector), and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set by the verb). Pending-pairing tests check that nothing is saved without Codes match. Pairing tests cover the offer and answer roundtrip, a forged offer signature, a far-future expiry, name checks, the pairing code (same both ways, changes if either key changes) and agent-side pinning (a reply from any other app key fails). One test, `known_gap_summary_not_bound_to_hash`, deliberately pins the open gap that the summary isn't tied to the hash yet; it gets flipped when the Prime reads the action itself. Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed).
 - `docs/colorblind.md`: the palette check behind the colorblind note.
 - `tools/colorblind.py`: re-runs that check (needs numpy). `--old` shows the previous palette.
+- `tools/decode_reply.py`: decodes a reply QR from a photo and verifies it against the pinned Prime key (needs zbar and the `cryptography` module).
 - `tools/*.sh`: simulator driving and screenshot scripts.
 
 ## About the screenshots
