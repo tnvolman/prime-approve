@@ -7,6 +7,10 @@ export global Callbacks {
     callback scan-tampered();
     callback scan-replay();
     callback scan-hidden();
+    callback scan-demo-pair();
+    callback manage-agent(int);
+    callback pair-confirm(string);
+    callback pair-cancel();
     callback approve();
     callback deny();
     callback deny-with(string);

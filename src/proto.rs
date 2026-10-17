@@ -10,6 +10,17 @@ pub const REQ_PREFIX: &str = "primeapprove:v1:";
 pub const RES_PREFIX: &str = "primeapprove:v1r:";
 const REQ_DOMAIN: &[u8] = b"primeapprove-req-v1\n";
 const RES_DOMAIN: &[u8] = b"primeapprove-res-v1\n";
+/// Pairing: the agent's offer (signed by the agent key it wants paired, proving it holds that key)
+/// and the Prime's answer (signed by the app key the agent must pin).
+pub const PAIR_PREFIX: &str = "primeapprove:pair:v1:";
+pub const PAIRED_PREFIX: &str = "primeapprove:paired:v1:";
+const PAIR_DOMAIN: &[u8] = b"primeapprove-pair-v1\n";
+const PAIRED_DOMAIN: &[u8] = b"primeapprove-paired-v1\n";
+const PAIR_CODE_DOMAIN: &[u8] = b"prime-approve pair v1";
+/// Names are given by the person on the Prime, never by the agent.
+pub const MAX_AGENT_NAME: usize = 24;
+/// Most agents a Prime keeps paired at once.
+pub const MAX_AGENTS: usize = 5;
 pub const MAX_QR: usize = 800;
 pub const MAX_TITLE: usize = 60;
 pub const MAX_DETAILS: usize = 280;
@@ -88,6 +99,23 @@ pub enum Reject {
     AlreadyUsed,
     Expired,
     TooFarAhead,
+}
+
+/// What the agent shows to pair. No name: the person names the agent on the Prime.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PairOffer {
+    /// Agent Ed25519 public key, 64 hex chars.
+    pub pk: String,
+    pub exp: u64,
+}
+
+/// What the Prime shows back after the person taps Pair.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PairedReply {
+    /// Key id of the agent key that was paired.
+    pub kid: String,
+    /// The Prime's app public key, 64 hex chars. The agent pins this.
+    pub app_pk: String,
 }
 
 /// Key id: first 16 hex chars of SHA-256(public key). Agents are looked up by this, never by display name.
@@ -200,8 +228,12 @@ pub fn is_elevated(req: &Request) -> bool {
 
 /// Time checks, run after `decode_request` once the clock is known.
 pub fn check_time(req: &Request, now: u64) -> Result<(), Reject> {
-    if req.exp <= now { return Err(Reject::Expired); }
-    if req.exp > now + MAX_LIFETIME_SECS + CLOCK_SKEW_SECS { return Err(Reject::TooFarAhead); }
+    check_exp(req.exp, now)
+}
+
+fn check_exp(exp: u64, now: u64) -> Result<(), Reject> {
+    if exp <= now { return Err(Reject::Expired); }
+    if exp > now + MAX_LIFETIME_SECS + CLOCK_SKEW_SECS { return Err(Reject::TooFarAhead); }
     Ok(())
 }
 
@@ -258,6 +290,75 @@ pub fn verify_reply(qr: &str, app_pk: &VerifyingKey, want_id: &str, want_kid: &s
     if app_pk.verify_strict(&[RES_DOMAIN, &body].concat(), &sig).is_err() { return false; }
     let Ok(r) = serde_json::from_slice::<Reply>(&body) else { return false };
     r.id == want_id && r.kid == want_kid && r.hash == want_hash && r.decision == "approve"
+}
+
+// ---------------------------------------------------------------- pairing
+
+/// A name the person typed for an agent: printable ASCII, 1 to 24 chars, no leading/trailing spaces.
+pub fn valid_agent_name(name: &str) -> bool {
+    let n = name.chars().count();
+    (1..=MAX_AGENT_NAME).contains(&n) && name.trim() == name && !name.chars().any(|c| unsafe_char(c, false))
+}
+
+/// Pairing code shown on BOTH screens: the first 12 bytes of
+/// SHA-256("prime-approve pair v1" || agent_pk || app_pk), as 6 groups of 4 uppercase hex chars.
+/// If someone swapped either key on the way, the two screens show different codes.
+pub fn pairing_code(agent_pk: &VerifyingKey, app_pk: &VerifyingKey) -> String {
+    let d = Sha256::digest([PAIR_CODE_DOMAIN, agent_pk.as_bytes(), app_pk.as_bytes()].concat());
+    let h = hex::encode_upper(&d[..12]);
+    (0..6).map(|i| &h[i * 4..i * 4 + 4]).collect::<Vec<_>>().join(" ")
+}
+
+fn split_signed<'q>(qr: &'q str, prefix: &str) -> Result<(Vec<u8>, Signature), Reject> {
+    if qr.len() > MAX_QR { return Err(Reject::TooLarge(qr.len())); }
+    let rest = qr.strip_prefix(prefix).ok_or(Reject::Malformed("wrong prefix"))?;
+    let (b, s) = rest.split_once('.').ok_or(Reject::Malformed("missing signature"))?;
+    let body = B64.decode(b).map_err(|_| Reject::Malformed("bad body encoding"))?;
+    let sig = B64.decode(s).map_err(|_| Reject::Malformed("bad signature encoding"))?;
+    let sig = Signature::from_slice(&sig).map_err(|_| Reject::Malformed("bad signature length"))?;
+    Ok((body, sig))
+}
+
+fn parse_pk(hex_pk: &str) -> Option<VerifyingKey> {
+    let b: [u8; 32] = hex::decode(hex_pk).ok()?.try_into().ok()?;
+    VerifyingKey::from_bytes(&b).ok()
+}
+
+/// Agent side (and the demo): the pairing offer QR, signed by the key being offered.
+pub fn encode_pair_offer(agent: &SigningKey, exp: u64) -> String {
+    let body = serde_json::to_vec(&PairOffer { pk: hex::encode(agent.verifying_key().as_bytes()), exp }).unwrap();
+    let sig = agent.sign(&[PAIR_DOMAIN, &body].concat());
+    format!("{PAIR_PREFIX}{}.{}", B64.encode(&body), B64.encode(sig.to_bytes()))
+}
+
+/// Prime side: checks a pairing offer and returns the agent key. The signature only proves the
+/// agent holds that key; whether it is the RIGHT agent is decided by the person comparing the
+/// pairing code on both screens.
+pub fn decode_pair_offer(qr: &str, now: Option<u64>) -> Result<VerifyingKey, Reject> {
+    let (body, sig) = split_signed(qr, PAIR_PREFIX)?;
+    let offer: PairOffer = serde_json::from_slice(&body).map_err(|_| Reject::Malformed("bad body"))?;
+    let pk = parse_pk(&offer.pk).ok_or(Reject::Malformed("agent key must be 32-byte hex"))?;
+    pk.verify_strict(&[PAIR_DOMAIN, &body].concat(), &sig).map_err(|_| Reject::BadSignature)?;
+    if let Some(now) = now { check_exp(offer.exp, now)?; }
+    Ok(pk)
+}
+
+/// Prime side: the answer QR, signed by the app key.
+pub fn encode_paired_reply(agent_pk: &VerifyingKey, app: &SigningKey) -> String {
+    let body = serde_json::to_vec(&PairedReply { kid: kid(agent_pk), app_pk: hex::encode(app.verifying_key().as_bytes()) }).unwrap();
+    let sig = app.sign(&[PAIRED_DOMAIN, &body].concat());
+    format!("{PAIRED_PREFIX}{}.{}", B64.encode(&body), B64.encode(sig.to_bytes()))
+}
+
+/// Agent side: checks the Prime's answer and returns the app key to PIN. From then on the agent
+/// must check every reply against this pinned key (`verify_reply`) and reject any other key.
+/// The agent must also show `pairing_code(own_pk, app_pk)` so the person can compare it.
+pub fn verify_paired_reply(qr: &str, agent_pk: &VerifyingKey) -> Option<VerifyingKey> {
+    let (body, sig) = split_signed(qr, PAIRED_PREFIX).ok()?;
+    let r: PairedReply = serde_json::from_slice(&body).ok()?;
+    let app_pk = parse_pk(&r.app_pk)?;
+    app_pk.verify_strict(&[PAIRED_DOMAIN, &body].concat(), &sig).ok()?;
+    (r.kid == kid(agent_pk)).then_some(app_pk)
 }
 
 #[cfg(test)]
@@ -420,5 +521,90 @@ mod tests {
         let no = encode_reply(&req, false, Some("unrecognized"), &app);
         println!("approve reply {} bytes, deny reply {} bytes", ok.len(), no.len());
         assert!(ok.len() <= 450 && no.len() <= 480);
+    }
+
+    // ---- Pairing (item 10) ----
+
+    fn agent_sk(n: u8) -> SigningKey { SigningKey::from_bytes(&[n; 32]) }
+    const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn pairing_roundtrip_and_pinning() {
+        let (agent, app) = (agent_sk(1), agent_sk(7));
+        let offer = encode_pair_offer(&agent, NOW + 300);
+        println!("pair offer {} bytes", offer.len());
+        assert!(offer.len() <= 300);
+        let pk = decode_pair_offer(&offer, Some(NOW)).expect("valid offer");
+        assert_eq!(pk, agent.verifying_key());
+        // The offer carries no name: the person names the agent on the Prime.
+        let body = String::from_utf8(B64.decode(offer.strip_prefix(PAIR_PREFIX).unwrap().split_once('.').unwrap().0).unwrap()).unwrap();
+        assert!(!body.contains("name"));
+
+        let reply = encode_paired_reply(&pk, &app);
+        println!("paired reply {} bytes", reply.len());
+        let pinned = verify_paired_reply(&reply, &agent.verifying_key()).expect("valid paired reply");
+        assert_eq!(pinned, app.verifying_key(), "agent pins the Prime's app key");
+        // Wrong agent: the reply names a different kid.
+        assert!(verify_paired_reply(&reply, &agent_sk(2).verifying_key()).is_none());
+
+        // After pinning, a reply signed by any other app key must fail.
+        let (req, _) = demo_req(None, None, None);
+        let impostor = agent_sk(9);
+        let fake = encode_reply(&req, true, None, &impostor);
+        assert!(!verify_reply(&fake, &pinned, &req.id, &req.kid, &req.hash));
+        let real = encode_reply(&req, true, None, &app);
+        assert!(verify_reply(&real, &pinned, &req.id, &req.kid, &req.hash));
+    }
+
+    #[test]
+    fn pair_offer_bad_signature_rejected() {
+        let offer = encode_pair_offer(&agent_sk(1), NOW + 300);
+        // Re-sign the same body with another key: the offered key didn't sign it.
+        let (head, _) = offer.rsplit_once('.').unwrap();
+        let body = B64.decode(head.strip_prefix(PAIR_PREFIX).unwrap()).unwrap();
+        let other = agent_sk(2).sign(&[PAIR_DOMAIN, &body].concat());
+        let forged = format!("{head}.{}", B64.encode(other.to_bytes()));
+        assert!(matches!(decode_pair_offer(&forged, Some(NOW)), Err(Reject::BadSignature)));
+        // A paired reply with a flipped body byte fails too.
+        let reply = encode_paired_reply(&agent_sk(1).verifying_key(), &agent_sk(7));
+        let mut b: Vec<char> = reply.chars().collect();
+        let i = PAIRED_PREFIX.len() + 10;
+        b[i] = if b[i] == 'A' { 'B' } else { 'A' };
+        assert!(verify_paired_reply(&b.into_iter().collect::<String>(), &agent_sk(1).verifying_key()).is_none());
+        assert!(matches!(decode_pair_offer("primeapprove:pair:v1:x", Some(NOW)), Err(Reject::Malformed(_))));
+        assert!(matches!(decode_pair_offer(&"x".repeat(MAX_QR + 1), Some(NOW)), Err(Reject::TooLarge(_))));
+    }
+
+    #[test]
+    fn pair_offer_expiry_is_capped() {
+        let a = agent_sk(1);
+        assert!(matches!(decode_pair_offer(&encode_pair_offer(&a, 4_102_444_800), Some(NOW)), Err(Reject::TooFarAhead)));
+        assert!(matches!(decode_pair_offer(&encode_pair_offer(&a, NOW - 1), Some(NOW)), Err(Reject::Expired)));
+        assert!(decode_pair_offer(&encode_pair_offer(&a, NOW + MAX_LIFETIME_SECS), Some(NOW)).is_ok());
+    }
+
+    #[test]
+    fn agent_names_are_checked() {
+        for ok in ["Cos", "Build bot #2", &"x".repeat(MAX_AGENT_NAME)] { assert!(valid_agent_name(ok), "{ok:?}"); }
+        for bad in ["", " Cos", "Cos ", "C\u{0430}s", "Cos\u{202E}", "Cos\tbot", &"x".repeat(MAX_AGENT_NAME + 1)] {
+            assert!(!valid_agent_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn pairing_code_matches_both_ways_and_binds_both_keys() {
+        let (a, p) = (agent_sk(1).verifying_key(), agent_sk(7).verifying_key());
+        let code = pairing_code(&a, &p);
+        assert_eq!(code.len(), 29);
+        assert_eq!(code.split(' ').count(), 6);
+        assert!(code.split(' ').all(|g| g.len() == 4 && g.chars().all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c))));
+        // The agent computes it from its own key and the pinned app key from the paired reply.
+        let reply = encode_paired_reply(&a, &agent_sk(7));
+        let pinned = verify_paired_reply(&reply, &a).unwrap();
+        assert_eq!(pairing_code(&a, &pinned), code);
+        assert_ne!(pairing_code(&agent_sk(2).verifying_key(), &p), code, "agent key swapped");
+        assert_ne!(pairing_code(&a, &agent_sk(8).verifying_key()), code, "app key swapped");
+        assert_ne!(pairing_code(&p, &a), code, "order matters");
+        println!("pairing code {code}");
     }
 }

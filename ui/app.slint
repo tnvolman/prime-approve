@@ -5,10 +5,12 @@ import { Theme, UISize, Images, ControlSize, ButtonVariant } from "@ui/theme.sli
 import { Callbacks } from "callbacks.slint";
 import { Button } from "@ui/button.slint";
 import { PremiumSlide } from "premium_slide.slint";
+import { Input } from "@ui/input.slint";
 
 export { Callbacks, Theme, Images, ControlSize }
 
 export struct Glyph { color: color, shape: int }
+export struct AgentRow { name: string, fp: string }
 export struct Recent { title: string, agent: string, approved: bool, when: string }
 
 // Trusted frame: only app-rendered content (paired name, risk, summary, action code, glyphs, expiry)
@@ -18,6 +20,16 @@ component TrustedFrame inherits Rectangle {
     border-width: 1px;
     border-color: Theme.palette-muted.transparentize(0.55);
     background: Theme.palette-muted.transparentize(0.94);
+}
+
+// The pairing code, drawn by the app inside a trusted frame. Same code on the agent's screen.
+component PairCode inherits TrustedFrame {
+    in property <string> code;
+    VerticalLayout {
+        padding: 12px; spacing: 4px;
+        Text { text: "PAIRING CODE"; horizontal-alignment: center; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-caption; font-weight: Theme.font-weight-semibold; letter-spacing: 1.5px; }
+        Text { text: root.code; horizontal-alignment: center; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: 28px; font-weight: Theme.font-weight-bold; letter-spacing: 3px; }
+    }
 }
 
 // Foundation's own warning amber, used only for the elevated-risk band.
@@ -60,14 +72,22 @@ export component AppWindow inherits Window {
     preferred-height: UISize.screen-height;
     background: Theme.palette-background;
 
-    // 0 home, 1 review, 2 reply, 3 error, 4 deny reason, 5 unpair prompt
+    // 0 home, 1 review, 2 reply, 3 error, 4 deny reason, 5 unpair prompt, 6 pair confirm, 7 paired reply
     in-out property <int> page: 0;
     in property <bool> show-dev: false;
     // Demo builds only (cargo feature "demo"): a demo agent with a public key is paired.
     in property <bool> demo-mode: false;
     in property <string> agent-name: "";
-    in property <string> agent-fp: "";
+    in property <[AgentRow]> agents: [];
     in property <bool> has-agent: true;
+
+    // Pairing (pages 6 and 7). pair-name is typed by the person; blank means pair-default.
+    in-out property <string> pair-name: "";
+    in property <string> pair-default: "Agent 1";
+    in property <string> pair-error: "";
+    in property <string> pair-fp: "";
+    in property <string> pair-code: "";
+    in property <bool> pair-repair: false;
     in property <string> app-key-line: "";
     in property <[Recent]> recents: [];
 
@@ -111,23 +131,29 @@ export component AppWindow inherits Window {
             Button {
                 width: 100%; full-width: true; size: ControlSize.lg;
                 min-button-height: 112px; font-size: Theme.font-size-title;
-                text: "Scan request";
+                text: "Scan code";
                 clicked => { Callbacks.scan-request(); }
             }
-            if root.demo-mode: Button {
-                width: 100%; full-width: true; size: ControlSize.md; variant: ButtonVariant.secondary;
-                text: "Demo request";
-                clicked => { Callbacks.scan-demo(); }
+            if root.demo-mode: HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Button { size: ControlSize.md; variant: ButtonVariant.secondary; horizontal-stretch: 1; text: "Demo request"; clicked => { Callbacks.scan-demo(); } }
+                Button { size: ControlSize.md; variant: ButtonVariant.secondary; horizontal-stretch: 1; text: "Demo pair"; clicked => { Callbacks.scan-demo-pair(); } }
             }
             VerticalLayout {
                 spacing: Theme.spacing-sm;
-                Label { text: "PAIRED AGENT"; }
-                if root.has-agent: HorizontalLayout {
-                    spacing: Theme.spacing-sm;
-                    Body { text: root.agent-name; font-weight: Theme.font-weight-semibold; horizontal-stretch: 1; }
-                    Body { text: root.agent-fp; color: Theme.palette-muted; horizontal-stretch: 0; }
+                Label { text: root.agents.length > 1 ? "PAIRED AGENTS" : "PAIRED AGENT"; }
+                // Tap an agent to unpair it.
+                for ag[i] in root.agents: TouchArea {
+                    height: 30px;
+                    clicked => { Callbacks.manage-agent(i); }
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+                        Body { text: ag.name; font-weight: Theme.font-weight-semibold; horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
+                        Body { text: ag.fp; color: Theme.palette-muted; horizontal-stretch: 0; wrap: no-wrap; vertical-alignment: center; }
+                        Body { text: "›"; color: Theme.palette-muted; horizontal-stretch: 0; vertical-alignment: center; }
+                    }
                 }
-                if !root.has-agent: Body { text: "No agent paired."; color: Theme.palette-muted; }
+                if !root.has-agent: Body { text: "No agent paired. Scan your agent's pairing code."; color: Theme.palette-muted; }
             }
             VerticalLayout {
                 spacing: Theme.spacing-sm;
@@ -267,10 +293,54 @@ export component AppWindow inherits Window {
             spacing: Theme.spacing-md;
             Rectangle { height: 24px; }
             Text { text: "Unpair this agent?"; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; horizontal-alignment: center; }
-            Body { text: root.agent-name + " won't be able to send you requests until you pair it again."; color: Theme.palette-muted; horizontal-alignment: center; }
+            Body { text: root.agent-name + " won't be able to send you requests until you pair it again. This is saved, so it stays unpaired after a restart."; color: Theme.palette-muted; horizontal-alignment: center; }
             Rectangle { vertical-stretch: 1; }
             PremiumSlide { width: 100%; vertical-stretch: 0; hint: "Slide to unpair"; done-hint: "Unpaired"; accent: Theme.palette-danger; activated => { Callbacks.unpair(true); } }
             Button { width: 100%; full-width: true; text: "Keep paired"; variant: ButtonVariant.ghost; clicked => { Callbacks.unpair(false); } }
+        }
+    
+        // ---------- Pair confirm ----------
+        // The frame holds only app-computed values (pairing code, key fingerprint). The offer carries
+        // no name: the person names the agent here.
+        if root.page == 6: VerticalLayout {
+            spacing: Theme.spacing-md;
+            Label { text: root.pair-repair ? "PAIRED BEFORE" : "NEW AGENT"; horizontal-alignment: center; }
+            Text { text: root.pair-repair ? "Pair this agent again?" : "Pair this agent?"; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; horizontal-alignment: center; }
+            PairCode { code: root.pair-code; }
+            Text { text: "Agent key " + root.pair-fp; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; horizontal-alignment: center; }
+            Body { text: "Pair only if your agent shows this same code."; horizontal-alignment: center; font-weight: Theme.font-weight-semibold; }
+            Label { text: "NAME THIS AGENT"; }
+            Input {
+                width: 100%;
+                height: self.preferred-height;
+                vertical-stretch: 0;
+                placeholder: root.pair-default;
+                value <=> root.pair-name;
+                error: root.pair-error;
+                clearable: true;
+                submitted => { Callbacks.pair-confirm(root.pair-name); }
+            }
+            Rectangle { vertical-stretch: 1; }
+            Button { width: 100%; text: "Pair"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.pair-confirm(root.pair-name); } }
+            Button { width: 100%; text: "Cancel"; variant: ButtonVariant.ghost; full-width: true; clicked => { Callbacks.pair-cancel(); } }
+        }
+
+        // ---------- Paired: answer QR for the agent ----------
+        if root.page == 7: VerticalLayout {
+            spacing: Theme.spacing-md;
+            HorizontalLayout { alignment: center; spacing: Theme.spacing-sm;
+                VerticalLayout { alignment: center; Mark { good: true; size: 28px; } }
+                Text { text: "Paired with " + root.agent-name; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; vertical-alignment: center; overflow: elide; }
+            }
+            HorizontalLayout { alignment: center;
+                Rectangle { width: 300px; height: 300px; background: white; border-radius: 12px;
+                    Image { width: 284px; height: 284px; source: root.reply-qr; image-rendering: pixelated; }
+                }
+            }
+            PairCode { code: root.pair-code; }
+            Body { text: "Show this to your agent. Check this code matches your agent."; horizontal-alignment: center; font-weight: Theme.font-weight-semibold; }
+            Rectangle { vertical-stretch: 1; }
+            Button { width: 100%; text: "Done"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.done(); } }
         }
     }
 }
