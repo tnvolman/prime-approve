@@ -1,0 +1,160 @@
+{
+ "note": "Shared action-parsing cases: Rust (host-tests interop) and Python (agent/tests) must agree on every one.",
+ "cases": [
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"tnvolman/typewright-website-audit\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "Merge \u2192 PR #2 \u2192 tnvolman/typewright-website-audit",
+   "detail": "squash · head 33393c6"
+  },
+  {
+   "action": "{\n \"tool\": \"github.merge_pull_request\",\n \"repo\": \"a/b\", \"pr\": 2,\n \"method\": \"rebase\", \"head\": \"33393c61b3e595bfb83bb9b909e280b2f40f0976\"\n}",
+   "expect": "Merge \u2192 PR #2 \u2192 a/b",
+   "detail": "rebase · head 33393c6"
+  },
+  {
+   "action": "{\"tool\":\"github.delete_repo\",\"repo\":\"tnvolman/typewright-website-audit\"}",
+   "expect": "unknown",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"ci.run\",\"tool\":\"github.merge_pull_request\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"x\":[1,2,{\"y\":null}],\"tool\":\"shell.exec\",\"cmd\":\"rm -rf /\"}",
+   "expect": "unknown",
+   "detail": null
+  },
+  {
+   "action": "not json",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "[1,2]",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":7}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"repo\":\"a/b\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"x\",\"pad\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"x\",\"t\":\"caf\u00e9\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"x\",\"t\":\"a\tb\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"x\",\"n\":NaN}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"x\",\"s\":\"\\ud800\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"x\",}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\",\"delete_branch\":true}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"repo\":\"c/d\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":2,\"method\":\"squash\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":\"2\",\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":2.5,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":2.0,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":true,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":-1,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":0,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":2,\"method\":\"force\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a b/c\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b/c\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"../b\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393c61b3e595bfb83bb9b909e280b2f40f0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393C61B3E595BFB83BB9B909E280B2F40F0976\"}",
+   "expect": "reject",
+   "detail": null
+  },
+  {
+   "action": "{\"tool\":\"github.merge_pull_request\",\"repo\":\"a/b\",\"pr\":2,\"method\":\"squash\",\"head\":\"33393c6\"}",
+   "expect": "reject",
+   "detail": null
+  }
+ ]
+}

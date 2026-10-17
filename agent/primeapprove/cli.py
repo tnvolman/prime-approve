@@ -18,7 +18,7 @@ import sys
 import time
 
 from . import qr, store
-from .protocol import (MAX_LIFETIME_SECS, PAIRED_PREFIX, REPLY_PREFIX, VERBS, ProtocolError, action_code,
+from .protocol import (MAX_LIFETIME_SECS, PAIRED_PREFIX, REPLY_PREFIX, ProtocolError, action_code, summary_line,
                        build_request, encode_pair_offer, fingerprint, glyphs, kid, pairing_code, parse_reply,
                        public_bytes, verify_paired_reply, verify_reply, GLYPH_COLORS, GLYPH_SHAPES)
 
@@ -51,11 +51,24 @@ def cmd_pair_accept(a) -> int:
     code = pairing_code(pk, app_pk)
     print(f"The Prime's answer is validly signed. Prime key {fingerprint(app_pk)}")
     print(f"\n    PAIRING CODE  {code}\n")
-    sys.stdout.write("Does the Prime show the same code? [y/N] ")
-    sys.stdout.flush()
-    answer = sys.stdin.readline().strip().lower()
-    if answer not in ("y", "yes"):
-        print("Not pinned. Tap Don't match on the Prime too, so it saves nothing either.")
+    try:
+        old = store.pinned_prime()
+    except ProtocolError:
+        old = None
+    if old is not None and old != app_pk:
+        # Replacing the trusted Prime is what an attacker would want; make it deliberate.
+        print("WARNING: This replaces the Prime you trust.")
+        print(f"    pinned now  {fingerprint(old)}")
+        print(f"    new Prime   {fingerprint(app_pk)}")
+        sys.stdout.write("If the Prime shows the same code and you mean to switch, type 'replace': ")
+        sys.stdout.flush()
+        ok = sys.stdin.readline().strip() == "replace"
+    else:
+        sys.stdout.write("Does the Prime show the same code? [y/N] ")
+        sys.stdout.flush()
+        ok = sys.stdin.readline().strip().lower() in ("y", "yes")
+    if not ok:
+        print("Not pinned" + (" (the Prime you trust is unchanged)" if old else "") + ". Tap Don't match on the Prime too, so it saves nothing either.")
         return 1
     path = store.pin_prime(app_pk, code)
     print(f"Pinned the Prime's key in {path}. Now tap Codes match on the Prime.")
@@ -76,7 +89,7 @@ def cmd_request(a) -> int:
     except ProtocolError as e:
         print(f"warning: {e}. You won't be able to verify the reply.", file=sys.stderr)
     r = build_request(sk, _action_bytes(a), a.title, a.details.replace("\\n", "\n"), agent=a.agent,
-                      verb=a.verb, object=a.object, target=a.target, risk=a.risk, ttl=a.ttl, now=int(time.time()))
+                      ttl=a.ttl, now=int(time.time()))
     store.save_pending(r)
     qr.show(r.qr, a.png)
     if a.png:
@@ -85,6 +98,10 @@ def cmd_request(a) -> int:
         print(r.qr)
     shapes = ", ".join(f"{GLYPH_COLORS[c]} {GLYPH_SHAPES[s]}" for c, s in glyphs(r.hash))
     print(f"Request {r.id}  ({len(r.qr)} bytes, expires in {a.ttl // 60}:{a.ttl % 60:02d})")
+    if r.view and r.view.verb:
+        print(f"\nThe Prime will show:  {summary_line(r.view)}  ({r.view.detail}), high impact")
+    else:
+        print(f"\nThe Prime doesn't know tool {r.view.tool!r}: it will show the raw action, marked high impact.")
     print(f"\n    ACTION CODE  {action_code(r.hash)}\n    {shapes}\n")
     print("Check the Prime shows this same code. Then: pa verify <reply photo or text>")
     return 0
@@ -131,10 +148,8 @@ def main(argv=None) -> int:
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--action", help="the exact action JSON; its exact bytes are hashed")
     g.add_argument("--action-file", help="read the exact action bytes from a file")
-    s.add_argument("--title", required=True)
+    s.add_argument("--title", default="", help="your description; the Prime shows it only as 'Agent says'")
     s.add_argument("--details", default="", help="up to 280 chars; \\n for a new line")
-    s.add_argument("--verb", choices=VERBS); s.add_argument("--object"); s.add_argument("--target")
-    s.add_argument("--risk", choices=["routine", "elevated"], help="default: elevated for high-impact verbs")
     s.add_argument("--agent", default="agent", help="display name inside the request (the Prime shows its own name)")
     s.add_argument("--ttl", type=int, default=MAX_LIFETIME_SECS, help="seconds until expiry, at most 600")
     s.add_argument("--png"); s.add_argument("--text", action="store_true", help="also print the code text")
