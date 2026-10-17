@@ -194,7 +194,7 @@ The hash is still plain SHA-256 of the action bytes, so the demo action keeps ha
 
 `pa verify` tells an agent whether it was approved; it can't stop a compromised agent from going ahead anyway. The gate makes the approval **enforceable**: it holds the GitHub token, verifies the Prime's reply, and only then marks the **exact PR head commit** with the commit status `prime-approve` (state `success`), or merges that exact commit. With branch protection requiring that status, GitHub won't merge without it.
 
-> **Until branch protection requires the `prime-approve` check, a green check is only advice:** anyone with write access can still merge. This repo does not require it yet; turning that on is a repo settings change for the owner.
+> **Until branch protection requires the `prime-approve` check, a green check is only advice:** anyone with write access can still merge. This repo's main is **not Prime-protected** today: the check stays advisory until the five conditions in [docs/DECISIONS.md](docs/DECISIONS.md) are all true.
 
     pa gate-trust --prime-key <Prime app key hex> --agent-key <agent public key hex>   # once
     # the gate reads its own token from <gate home>/token (or --token-file); never printed.
@@ -222,7 +222,8 @@ Exit codes: 0 done, 1 denied, 2 refused. HTTP is standard-library `urllib`; `--a
 **Residual risks.**
 - **Admins can bypass** branch protection unless bypassing is disabled, and anyone who can change the settings can remove the requirement.
 - **Until the required check comes only from the gate's identity, any token with commit-status write access, including the agent's, can post a fake `prime-approve` success.** Give the agent a fine-grained token without *Commit statuses* or merge rights, or have the gate post as its own GitHub App.
-- **Anyone else who can post statuses** can post a `prime-approve` status too: a commit status is not tied to an app identity. Keep write access (and tokens with `repo:status`) away from the agent. A GitHub App check run, or a ruleset that requires the check from a specific app, would pin who posted it (not done yet).
+- **Pin the check to the gate's App.** GitHub can tie a required status check, including a plain commit status, to one GitHub App, and then a same-named status from anyone else doesn't satisfy it ([GitHub changelog](https://github.blog/changelog/2021-12-01-ensure-required-status-checks-provided-by-the-intended-app/)). That needs the gate to post as its own App, and one status posted by the App before the rule is added. Today the gate posts with a personal token, so this isn't done yet.
+- **An agent that can drive the Prime can approve for itself.** Foundation's `foundation-passport-drive` can tap "approve" in the simulator (`tools/flow.sh` does exactly that) and on a dev unit plugged into the agent's machine with Developer Mode on. Real approvals must come from a Prime the agent can't drive.
 - **The token's scope is the gate's blast radius.** A classic `repo` token can do much more than post statuses; prefer a fine-grained token limited to this repository with *Commit statuses: write* (plus *Pull requests: read*, and *Contents: write* only for merge mode).
 - The approval covers the head commit, not the base: merging into a base that moved is GitHub's normal behavior.
 
