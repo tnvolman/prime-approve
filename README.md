@@ -14,6 +14,10 @@ Status: simulator demo. Not yet run on hardware (see *Known items to test on har
 |---|---|---|
 | ![Why deny?](docs/screenshots/deny-reason.png) | ![Already used](docs/screenshots/rejected-replayed.png) | ![Hidden characters](docs/screenshots/rejected-hidden-text.png) |
 
+| Denied reply | Unpair | Bad signature |
+|---|---|---|
+| ![Denied: signed reply QR with reason](docs/screenshots/denied-reply.png) | ![Unpair this agent?](docs/screenshots/unpair.png) | ![Bad signature (tampered request)](docs/screenshots/rejected-tampered.png) |
+
 ## Formats (see `src/proto.rs`)
 
 **Request QR** `primeapprove:v1:<b64url(json)>.<b64url(ed25519 sig)>`. The signature covers `"primeapprove-req-v1\n" + json`, the exact bytes received. The whole QR must be 800 bytes or less.
