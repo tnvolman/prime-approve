@@ -37,17 +37,17 @@ When the Prime shows a request inside the bordered panel and the person slides t
 | Tampered request | Blocked | Ed25519 signature checked before parsing, domain-separated |
 | Unknown agent | Blocked | Lookup by key id against paired keys |
 | Replay of an old approval | Blocked by the agent or gate | Single-use IDs and expiry enforced where the credential lives; Prime also remembers 512 answered IDs |
-| Far-future expiry | Fix in v0.2 | Reject expiry more than 10 minutes out |
-| Hidden or look-alike text | Fix in v0.2 | Allow only printable ASCII (plus newline in details) |
-| Agent hides risk | Fix in v0.2 | "High impact" set from the action word, not by the agent |
-| Public demo key trusted on a device | Fix in v0.2 | Demo key behind a build flag, off by default, with a visible warning |
+| Far-future expiry | Blocked | Reject expiry more than 10 minutes out |
+| Hidden or look-alike text | Blocked | Allow only printable ASCII (plus newline in details) |
+| Agent hides risk | Blocked | "High impact" set from the action word, not by the agent |
+| Public demo key trusted on a device | Blocked | Demo key behind a build flag, off by default, with a visible warning |
 | Agent describes one action and hashes another | Open | Prime parses the action and computes the hash (clear-signing) |
 | Compromised agent skips approval | Open | Gate on a separate machine holds the credential; GitHub enforces via required check or deployment protection rule |
 | Approver doesn't compare codes carefully | Partly mitigated | Action code plus shape row; clear-signing reduces reliance on comparison |
 | Unattended unlocked Prime | Open | Short expiry; ask Foundation about a KeyOS-drawn confirmation for high-impact approvals |
 | Lost Prime | Open | Key epoch in HKDF info ("app key v1" to v2) and unpairing at the agent or gate |
-| Key swapped during pairing | Mitigated | Pairing code derived from both keys, compared on both screens before anything is saved; the agent pins the Prime's key |
-| Unpaired agent keeps access | Fixed | Unpairing is saved and survives a restart; requests from that agent are refused |
+| Key swapped during pairing | Blocked | Pairing code from both keys, compared on both screens; saved only on "Codes match"; agent pins the Prime's key after its user confirms |
+| Unpaired agent keeps access | Blocked | Unpairing is saved and survives a restart; that agent's requests are refused |
 | Fork reuses our app-id | Documented | The app key derives from app-id plus master seed; forks must change the app-id |
 
 ## Rules for anyone integrating
