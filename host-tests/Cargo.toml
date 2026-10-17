@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Michael McClanahan
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Host-side test crate: runs src/proto.rs tests on a normal computer (no KeyOS SDK needed).
+
+[package]
+name = "prime-approve-host-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["fast", "std"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

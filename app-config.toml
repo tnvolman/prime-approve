@@ -1,7 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Michael McClanahan
 # SPDX-FileCopyrightText: 2026 Foundation Devices, Inc. <hello@foundation.xyz>
 # SPDX-License-Identifier: MIT
 
-# Foundation application configuration
+# Foundation application configuration.
+# Forks: change app-id. The app's signing key is derived from it, so two apps sharing an
+# app-id would share a key.
 app-name = "prime-approve"
 friendly-app-name = "Prime Approve"
 launcher-app-name = "Prime Approve"
@@ -12,13 +15,15 @@ app-id = "0xc89f8e722d58df18b853b2eb68c19473"
 min-keyos-version = "1.0.0"
 
 [publisher]
-name = ""
+name = "Michael McClanahan"
 contact-email = ""
-support-url = ""
+support-url = "https://github.com/tnvolman/prime-approve/issues"
 
 [permissions]
 template = ["gui-app", "fs-generic"]
 "os/security" = ["GetAppSeed"]
+# Opens the system QR scanner from the "Scan request" button.
+"os/gui-server" = ["ShowModal"]
 
 [[qr-match-rules]]
 id = "prime-approve-request"

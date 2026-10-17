@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Michael McClanahan
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -15,6 +18,17 @@ pub const MAX_OBJECT: usize = 24;
 pub const MAX_TARGET: usize = 40;
 /// The only verbs the summary line may show. Anything else rejects the request.
 pub const VERBS: [&str; 10] = ["Merge", "Deploy", "Publish", "Delete", "Send", "Pay", "Sign", "Run", "Grant", "Change"];
+/// Verbs that always show the "High impact" band, whatever `risk` the agent sent.
+/// The agent can raise a request to elevated, but it can never lower one of these to routine.
+pub const HIGH_IMPACT_VERBS: [&str; 8] = ["Merge", "Deploy", "Publish", "Delete", "Send", "Pay", "Sign", "Grant"];
+/// A request may not expire more than this far in the future (plus `CLOCK_SKEW_SECS`).
+/// Short windows limit how long a captured request stays usable.
+pub const MAX_LIFETIME_SECS: u64 = 600;
+pub const CLOCK_SKEW_SECS: u64 = 60;
+
+/// The demo's action bytes: a real, already-merged PR, pinned to its head commit so the hash covers
+/// exactly which code would be merged. The agent hashes these exact bytes; the Prime never re-serializes.
+pub const DEMO_ACTION: &[u8] = br#"{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}"#;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Request {
@@ -73,6 +87,7 @@ pub enum Reject {
     UnsafeText,
     AlreadyUsed,
     Expired,
+    TooFarAhead,
 }
 
 /// Key id: first 16 hex chars of SHA-256(public key). Agents are looked up by this, never by display name.
@@ -111,19 +126,19 @@ pub const GLYPH_SHAPES: [&str; 4] = ["filled circle", "filled square", "ring", "
 /// on the Prime). `decode_request` only checks it is 64 hex chars, and the signature covers it.
 ///
 /// Rule: decode the hex to bytes h[0..32]. The text action code is h[0..4] as 8 uppercase hex
-/// chars ("BF35 8E2F"). Glyph i (i = 0..8) comes from byte b = h[4 + i]:
+/// chars ("1594 E5CC"). Glyph i (i = 0..8) comes from byte b = h[4 + i]:
 ///   color id = b & 0b111        (low 3 bits)  -> GLYPH_RGB / GLYPH_COLORS
 ///   shape id = (b >> 3) & 0b11  (bits 3 and 4) -> 0 filled circle, 1 filled square, 2 ring, 3 outlined square
 /// Bits 5..7 of each byte are unused. Bytes 12..32 are not shown.
 ///
 /// Test vector (the main.rs demo action, see `tests::demo_vector`):
-///   action = {"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":3,"method":"squash"}
-///   hash   = bf358e2fe2124f3996c349f0eaff5b137d52307d6d31d1d66d4f10785fa6b9df
-///   code   = BF35 8E2F
-///   bytes  = e2 12 4f 39 96 c3 49 f0
-///   ids    = (color, shape) (2,0) (2,2) (7,1) (1,3) (6,2) (3,0) (1,1) (0,2)
-///   glyphs = yellow circle, yellow ring, white square, orange outlined square,
-///            reddish purple ring, bluish green circle, orange square, vermillion ring
+///   action = {"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}
+///   hash   = 1594e5cc61b278e99dba75aad80d8b2dd41e135820630c1e12584dda3b95d9d8
+///   code   = 1594 E5CC
+///   bytes  = 61 b2 78 e9 9d ba 75 aa
+///   ids    = (color, shape) (1,0) (2,2) (0,3) (1,1) (5,3) (2,3) (5,2) (2,1)
+///   glyphs = orange circle, yellow ring, vermillion outlined square, orange square,
+///            blue outlined square, yellow outlined square, blue ring, yellow square
 ///
 /// The pattern helps a person notice a swapped or altered request at a glance. It is not the security
 /// boundary: the agent's signature and hash check in `verify_reply` is.
@@ -153,7 +168,7 @@ pub fn summary_parts(req: &Request) -> Result<Option<(&str, &str, &str)>, &'stat
     }
 }
 
-/// The one-line summary the app draws, e.g. "Merge → PR #3 → typewright-website-audit".
+/// The one-line summary the app draws, e.g. "Merge → PR #2 → typewright-website-audit".
 /// The arrows are added here; agents can't send them.
 pub fn summary_line(req: &Request) -> Option<String> {
     summary_parts(req).ok().flatten().map(|(v, o, t)| format!("{v} → {o} → {t}"))
@@ -164,16 +179,30 @@ pub fn fingerprint(pk: &VerifyingKey) -> String {
     format!("{}…{}", hex::encode(&d[..4]), hex::encode(&d[28..]))
 }
 
-/// Control characters (newline allowed in details) and bidi/zero-width formatting characters
-/// could hide or reorder text on the Review screen, so any of them rejects the request.
+/// Display text is an allowlist: printable ASCII (space through `~`), plus newline in details.
+/// Anything else (control, bidi, zero-width, line separators, soft hyphens, tag characters,
+/// look-alike letters from other scripts, blank fillers) rejects the request, because it could
+/// hide, reorder or disguise text on the Review screen.
 fn unsafe_char(c: char, allow_newline: bool) -> bool {
     if c == '\n' { return !allow_newline; }
-    c.is_control()
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
+    !matches!(c, ' '..='~')
 }
 
 pub fn text_is_safe(title: &str, details: &str) -> bool {
     !title.chars().any(|c| unsafe_char(c, false)) && !details.chars().any(|c| unsafe_char(c, true))
+}
+
+/// Whether the Review screen shows the "High impact" band. The verb decides when there is one;
+/// the agent's `risk` can only raise it.
+pub fn is_elevated(req: &Request) -> bool {
+    req.risk == "elevated" || req.verb.as_deref().is_some_and(|v| HIGH_IMPACT_VERBS.contains(&v))
+}
+
+/// Time checks, run after `decode_request` once the clock is known.
+pub fn check_time(req: &Request, now: u64) -> Result<(), Reject> {
+    if req.exp <= now { return Err(Reject::Expired); }
+    if req.exp > now + MAX_LIFETIME_SECS + CLOCK_SKEW_SECS { return Err(Reject::TooFarAhead); }
+    Ok(())
 }
 
 pub fn encode_request(req: &Request, agent: &SigningKey) -> String {
@@ -235,8 +264,7 @@ pub fn verify_reply(qr: &str, app_pk: &VerifyingKey, want_id: &str, want_kid: &s
 mod tests {
     use super::*;
 
-    const DEMO_ACTION: &[u8] = br#"{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":3,"method":"squash"}"#;
-    const DEMO_HASH: &str = "bf358e2fe2124f3996c349f0eaff5b137d52307d6d31d1d66d4f10785fa6b9df";
+    const DEMO_HASH: &str = "1594e5cc61b278e99dba75aad80d8b2dd41e135820630c1e12584dda3b95d9d8";
 
     fn named(hash: &str) -> Vec<String> {
         glyphs(hash).into_iter().map(|(c, s)| {
@@ -249,11 +277,11 @@ mod tests {
     fn demo_vector() {
         let h = hex::encode(Sha256::digest(DEMO_ACTION));
         assert_eq!(h, DEMO_HASH);
-        assert_eq!(action_code(&h), "BF35 8E2F");
-        assert_eq!(glyphs(&h), vec![(2, 0), (2, 2), (7, 1), (1, 3), (6, 2), (3, 0), (1, 1), (0, 2)]);
+        assert_eq!(action_code(&h), "1594 E5CC");
+        assert_eq!(glyphs(&h), vec![(1, 0), (2, 2), (0, 3), (1, 1), (5, 3), (2, 3), (5, 2), (2, 1)]);
         assert_eq!(named(&h), [
-            "yellow circle", "yellow ring", "white square", "orange outlined square",
-            "reddish purple ring", "bluish green circle", "orange square", "vermillion ring",
+            "orange circle", "yellow ring", "vermillion outlined square", "orange square",
+            "blue outlined square", "yellow outlined square", "blue ring", "yellow square",
         ]);
         // Upper-case hex gives the same glyphs.
         assert_eq!(glyphs(&h.to_uppercase()), glyphs(&h));
@@ -265,8 +293,8 @@ mod tests {
             id: "00112233445566778899aabbccddeeff".into(),
             kid: kid(&sk.verifying_key()),
             agent: "Cos (demo agent)".into(),
-            title: "Merge PR #3 into main".into(),
-            details: "Squash merge, delete branch.\n4 files, checks passed.".into(),
+            title: "Merge PR #2 into main".into(),
+            details: "Squash merge at 33393c6.\n10 files changed.".into(),
             risk: "elevated".into(),
             hash: DEMO_HASH.into(),
             exp: 1_792_000_000,
@@ -277,13 +305,13 @@ mod tests {
 
     #[test]
     fn summary_roundtrip_and_size() {
-        let (req, sk) = demo_req(Some("Merge"), Some("PR #3"), Some("typewright-website-audit"));
+        let (req, sk) = demo_req(Some("Merge"), Some("PR #2"), Some("typewright-website-audit"));
         let qr = encode_request(&req, &sk);
         println!("demo request with summary: {} bytes (cap {MAX_QR})", qr.len());
         assert!(qr.len() <= 600, "demo request is {} bytes; keep it <= 600 for real-camera scanning", qr.len());
         let agents = [Agent::new("Cos (demo agent)", sk.verifying_key())];
         let (r, _) = decode_request(&qr, &agents).expect("valid");
-        assert_eq!(summary_line(&r).as_deref(), Some("Merge → PR #3 → typewright-website-audit"));
+        assert_eq!(summary_line(&r).as_deref(), Some("Merge → PR #2 → typewright-website-audit"));
 
         let (plain, sk) = demo_req(None, None, None);
         let qr = encode_request(&plain, &sk);
@@ -294,15 +322,15 @@ mod tests {
 
     #[test]
     fn summary_rejects_bad_input() {
-        let (req, sk) = demo_req(Some("Merge"), Some("PR #3"), Some("typewright-website-audit"));
+        let (req, sk) = demo_req(Some("Merge"), Some("PR #2"), Some("typewright-website-audit"));
         let agents = [Agent::new("x", sk.verifying_key())];
         let long = "x".repeat(MAX_OBJECT + 1);
         let bad = [
-            (Some("Approve"), Some("PR #3"), Some("t")),            // verb not on the list
-            (Some("Merge"), Some("PR → #3"), Some("t")),            // fake separator
-            (Some("Merge"), Some("PR #3"), Some("a\u{202E}b")),     // bidi override
-            (Some("Merge"), Some("PR #3"), None),                   // partial
-            (Some("Merge"), Some(" PR #3"), Some("t")),             // padding
+            (Some("Approve"), Some("PR #2"), Some("t")),            // verb not on the list
+            (Some("Merge"), Some("PR → #2"), Some("t")),            // fake separator
+            (Some("Merge"), Some("PR #2"), Some("a\u{202E}b")),     // bidi override
+            (Some("Merge"), Some("PR #2"), None),                   // partial
+            (Some("Merge"), Some(" PR #2"), Some("t")),             // padding
             (Some("Merge"), Some(long.as_str()), Some("t")), // too long
         ];
         for (v, o, t) in bad {
@@ -325,5 +353,72 @@ mod tests {
         assert!(body(&no).contains(r#""reason":"wrong_action""#));
         assert!(!verify_reply(&no, &app.verifying_key(), &req.id, &req.kid, &req.hash));
         assert!(!verify_reply(&ok, &app.verifying_key(), &req.id, &req.kid, &"0".repeat(64)));
+    }
+
+    // ---- Review findings (Oct 17, 2026). Each test guards a fix, or pins a known gap. ----
+
+    #[test]
+    fn display_text_is_an_allowlist() {
+        let (req, sk) = demo_req(None, None, None);
+        let agents = [Agent::new("x", sk.verifying_key())];
+        // Each of these passed the old denylist.
+        for bad in ["\u{2028}", "\u{00AD}", "\u{E0041}", "\u{0430}", "\u{3164}", "\u{2800}", "\u{202E}", "\t"] {
+            let mut r = req.clone();
+            r.title = format!("Merge PR{bad}2");
+            assert!(matches!(decode_request(&encode_request(&r, &sk), &agents), Err(Reject::UnsafeText)), "{bad:?} in title");
+            let mut r = req.clone();
+            r.details = format!("ok\nfine{bad}");
+            assert!(matches!(decode_request(&encode_request(&r, &sk), &agents), Err(Reject::UnsafeText)), "{bad:?} in details");
+        }
+        let mut r = req.clone();
+        r.title = "Merge PR #2: fix [x] ~ok~".into();
+        assert!(decode_request(&encode_request(&r, &sk), &agents).is_ok());
+    }
+
+    #[test]
+    fn expiry_is_capped() {
+        let (mut req, _) = demo_req(None, None, None);
+        let now = 1_800_000_000;
+        req.exp = now + 600;
+        assert!(check_time(&req, now).is_ok());
+        req.exp = now;
+        assert!(matches!(check_time(&req, now), Err(Reject::Expired)));
+        req.exp = 4_102_444_800; // year 2100
+        assert!(matches!(check_time(&req, now), Err(Reject::TooFarAhead)));
+    }
+
+    #[test]
+    fn high_impact_verbs_cannot_be_downgraded() {
+        for v in HIGH_IMPACT_VERBS {
+            let (mut r, _) = demo_req(Some(v), Some("x"), Some("y"));
+            r.risk = "routine".into();
+            assert!(is_elevated(&r), "{v}");
+        }
+        let (mut r, _) = demo_req(Some("Run"), Some("tests"), Some("ci"));
+        r.risk = "routine".into();
+        assert!(!is_elevated(&r));
+        r.risk = "elevated".into();
+        assert!(is_elevated(&r), "agent may raise");
+    }
+
+    /// KNOWN GAP (plan item 13): the summary is written by the agent and is not tied to the hash,
+    /// so a "Merge PR #2" panel can carry the hash of a repo deletion. Flip this test when the Prime
+    /// parses the action bytes itself.
+    #[test]
+    fn known_gap_summary_not_bound_to_hash() {
+        let (mut r, sk) = demo_req(Some("Merge"), Some("PR #2"), Some("typewright-website-audit"));
+        r.hash = hex::encode(Sha256::digest(br#"{"tool":"github.delete_repo","repo":"tnvolman/typewright-website-audit"}"#));
+        let agents = [Agent::new("x", sk.verifying_key())];
+        assert!(decode_request(&encode_request(&r, &sk), &agents).is_ok());
+    }
+
+    #[test]
+    fn reply_sizes() {
+        let (req, _) = demo_req(None, None, None);
+        let app = SigningKey::from_bytes(&[7u8; 32]);
+        let ok = encode_reply(&req, true, None, &app);
+        let no = encode_reply(&req, false, Some("unrecognized"), &app);
+        println!("approve reply {} bytes, deny reply {} bytes", ok.len(), no.len());
+        assert!(ok.len() <= 450 && no.len() <= 480);
     }
 }

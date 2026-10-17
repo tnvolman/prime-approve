@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Michael McClanahan
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Colorblind check for the Prime Approve glyph palette.
 Machado, Oliveira & Fernandes (2009) severity-1.0 matrices applied in linear sRGB, then CIEDE2000 in CIELAB (D65)."""
 import itertools, math

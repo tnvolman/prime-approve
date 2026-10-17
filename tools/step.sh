@@ -1,4 +1,6 @@
 #!/bin/zsh
+# SPDX-FileCopyrightText: 2026 Michael McClanahan
+# SPDX-License-Identifier: GPL-3.0-or-later
 # usage: step.sh <outname> <cmd...>  (cmds: "tap x y" or "swipe sx sy ex ey")
 P=~/.foundation/sdk/foundation-sdk-1.1.0-aarch64-apple-darwin/bin/foundation-passport-drive
 cd ~/keyos/prime-approve

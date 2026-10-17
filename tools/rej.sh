@@ -1,4 +1,6 @@
 #!/bin/zsh
+# SPDX-FileCopyrightText: 2026 Michael McClanahan
+# SPDX-License-Identifier: GPL-3.0-or-later
 P=~/.foundation/sdk/foundation-sdk-1.1.0-aarch64-apple-darwin/bin/foundation-passport-drive; S=~/keyos/prime-approve/shots
 pkill -f foundation-simulator; rm -f /tmp/pa.log; /tmp/runpa.sh </dev/null >/tmp/pa.out 2>&1 &
 for i in {1..60}; do sleep 3; grep -aq "launch #" /tmp/pa.log 2>/dev/null && break; done; sleep 4

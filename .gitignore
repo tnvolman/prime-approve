@@ -1,5 +1,6 @@
-target/
 .foundation-sdk/
-ui/ui
+host-tests/target/
 manifest.toml
 shots/
+target/
+ui/ui

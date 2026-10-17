@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Michael McClanahan
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 mod proto;
 mod theme;
 
@@ -17,13 +20,20 @@ security::use_api!();
 const STATE_FILE: &str = "state.json";
 const MAX_SEEN: usize = 512;
 const MAX_RECENT: usize = 10;
+/// Demo mode: built only with `--features demo`. It pairs a demo agent whose private key is public
+/// (anyone can sign as it), so a demo build shows a "Demo key, not secure" banner on every screen.
+/// A default build has no demo key, no demo agent and no demo buttons.
+const DEMO: bool = cfg!(feature = "demo");
+#[cfg(feature = "demo")]
 const DEMO_AGENT: &str = "Cos (demo agent)";
-const DEMO_TITLE: &str = "Merge PR #3 into main";
-// Kept short so the demo request QR is <= 600 bytes (594 with the summary fields), well under MAX_QR:
-// dense QRs are hard for a real camera. The repo is carried by the summary target.
-const DEMO_DETAILS: &str = "Squash merge, delete branch.\n4 files, checks passed.";
-// Security demo buttons only exist in debug (simulator) builds.
-const SHOW_DEV: bool = cfg!(debug_assertions);
+#[cfg(feature = "demo")]
+const DEMO_TITLE: &str = "Merge PR #2 into main";
+// A real, already-merged PR (tnvolman/typewright-website-audit #2), pinned to its head commit.
+// Kept short so the demo request QR stays <= 600 bytes: dense QRs are hard for a real camera.
+#[cfg(feature = "demo")]
+const DEMO_DETAILS: &str = "Squash merge at 33393c6.\n10 files changed.";
+// Security demo buttons (tampered, replay, hidden text) need a demo build AND a debug build.
+const SHOW_DEV: bool = DEMO && cfg!(debug_assertions);
 
 /// Only the title, agent, decision and time are kept. Details are never stored.
 #[derive(Serialize, Deserialize, Clone)]
@@ -43,8 +53,10 @@ struct State {
 }
 
 struct App {
-    app_key: SigningKey,
+    /// None until the boot timer has fetched the app seed (it can only be fetched once the event loop runs).
+    app_key: Option<SigningKey>,
     agents: Vec<Agent>,
+    #[cfg(feature = "demo")]
     demo_agent: SigningKey,
     state: State,
     current: Option<Request>,
@@ -69,7 +81,8 @@ fn ago(at: u64) -> String {
     }
 }
 
-// SIM DEMO ONLY: a fixed, publicly known agent key so the demo request can be generated on-device.
+// DEMO BUILDS ONLY: a fixed, publicly known agent key so the demo request can be generated on-device.
+#[cfg(feature = "demo")]
 fn demo_agent_key() -> SigningKey {
     let seed: [u8; 32] = Sha256::digest(b"prime-approve DEMO agent key - public, never use for real").into();
     SigningKey::from_bytes(&seed)
@@ -118,28 +131,24 @@ fn app_main(cx: AppContext, ui: AppWindow) {
     theme::init(&ui);
     ui.set_show_dev(SHOW_DEV);
 
-    let seed = match Security::default().app_seed() {
-        Ok(s) => *s.as_bytes(),
-        Err(e) => {
-            log::error!("GetAppSeed denied: {e:?}");
-            show_error(&ui, "No app key", "The app key permission was denied, so this app can't sign anything.", "Allow it in Settings, then reopen Prime Approve.");
-            ui.run().expect("UI running");
-            return;
-        }
-    };
-    // HKDF-SHA256 over the app seed so the signing key is only ever used for Prime Approve replies.
-    let mut okm = [0u8; 32];
-    hkdf::Hkdf::<Sha256>::new(Some(b"prime-approve"), &seed).expand(b"app key v1", &mut okm).expect("32-byte okm");
-    let app_key = SigningKey::from_bytes(&okm);
-
     let mut state = load(&cx);
     state.launches += 1;
     save(&cx, &state);
     log::info!("launch #{} with {} seen request IDs (storage test)", state.launches, state.seen.len());
 
+    ui.set_demo_mode(DEMO);
+    #[cfg(feature = "demo")]
     let demo_agent = demo_agent_key();
+    #[cfg(feature = "demo")]
     let agents = vec![Agent::new(DEMO_AGENT, demo_agent.verifying_key())];
-    let app = Rc::new(RefCell::new(App { app_key, agents, demo_agent, state, current: None, current_agent: String::new(), last_good_qr: None, pending_reply: None }));
+    #[cfg(not(feature = "demo"))]
+    let agents: Vec<Agent> = Vec::new();
+    let app = Rc::new(RefCell::new(App {
+        app_key: None, agents,
+        #[cfg(feature = "demo")]
+        demo_agent,
+        state, current: None, current_agent: String::new(), last_good_qr: None, pending_reply: None,
+    }));
 
     let refresh_home = {
         let ui = ui.as_weak();
@@ -156,7 +165,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 title: d.title.clone().into(), agent: d.agent.clone().into(), approved: d.approved, when: ago(d.at).into(),
             }).collect();
             ui.set_recents(slint::ModelRc::new(slint::VecModel::from(rows)));
-            ui.set_app_key_line(format!("Launch #{} · {} IDs used · app key {}", a.state.launches, a.state.seen.len(), fingerprint(&a.app_key.verifying_key())).into());
+            let key = a.app_key.as_ref().map(|k| fingerprint(&k.verifying_key())).unwrap_or_else(|| "loading".into());
+            ui.set_app_key_line(format!("Launch #{} · {} IDs used · app key {}", a.state.launches, a.state.seen.len(), key).into());
             ui.set_page(0);
         }
     };
@@ -192,7 +202,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             // because the band sits inside the trusted frame.
             let res = decode_request(&qr, &a.agents).map(|(r, ag)| (r, ag.name.clone())).and_then(|(r, name)| {
                 if a.state.seen.contains(&r.id) { return Err(Reject::AlreadyUsed); }
-                if let Some(now) = now_secs() { if r.exp <= now { return Err(Reject::Expired); } }
+                if let Some(now) = now_secs() { check_time(&r, now)?; }
                 Ok((r, name))
             });
             match res {
@@ -200,7 +210,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     let exp = match now_secs() { Some(now) => { let l = r.exp - now; format!("Expires in {}:{:02}", l / 60, l % 60) } None => "Expiry checked by agent".into() };
                     ui.set_agent_name(paired_name.clone().into());
                     ui.set_summary_line(summary_line(&r).unwrap_or_default().into());
-                    ui.set_elevated(r.risk == "elevated");
+                    ui.set_elevated(is_elevated(&r));
                     ui.set_req_title(r.title.clone().into());
                     ui.set_req_details(r.details.clone().into());
                     ui.set_action_code(action_code(&r.hash).into());
@@ -223,6 +233,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                         Reject::BadSignature => ("Bad signature", "The request was changed after your agent signed it, or it didn't come from a paired agent.".to_string(), "Ask your agent to send a new request."),
                         Reject::AlreadyUsed => ("Already used", "This request was already answered. Each request can be answered once.".to_string(), "If you still need this, ask for a fresh request."),
                         Reject::Expired => ("Expired", "This request ran out of time before it was answered.".to_string(), "Ask for a fresh request."),
+                        Reject::TooFarAhead => ("Expiry too long", format!("This request stays valid for more than {} minutes. Requests must be short-lived.", MAX_LIFETIME_SECS / 60), "Ask your agent to send a new request."),
                     };
                     show_error(&ui, t, &b, n);
                 }
@@ -230,47 +241,81 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         }
     };
 
-    let make_demo = {
-        let app = app.clone();
-        move |title: &str| -> String {
-            let a = app.borrow();
-            let action = br#"{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":3,"method":"squash"}"#;
-            let mut id = [0u8; 16];
-            getrandom::getrandom(&mut id).expect("TRNG");
-            let req = Request {
-                id: hex::encode(id),
-                kid: kid(&a.demo_agent.verifying_key()),
-                agent: DEMO_AGENT.into(),
-                title: title.into(),
-                details: DEMO_DETAILS.into(),
-                risk: "elevated".into(),
-                hash: hex::encode(Sha256::digest(action)),
-                exp: now_secs().unwrap_or(0) + 600,
-                verb: Some("Merge".into()),
-                object: Some("PR #3".into()),
-                target: Some("typewright-website-audit".into()),
-            };
-            encode_request(&req, &a.demo_agent)
-        }
-    };
-
     let cb = ui.global::<Callbacks>();
-    // Validly signed, but the title carries a right-to-left override that would visually reorder it.
-    { let h = handle_scan.clone(); let m = make_demo.clone(); cb.on_scan_hidden(move || h(m("Merge PR #3 \u{202E}tfard sa evas"))); }
-    { let h = handle_scan.clone(); let m = make_demo.clone(); cb.on_scan_demo(move || h(m(DEMO_TITLE))); }
-    { let h = handle_scan.clone(); let m = make_demo.clone(); cb.on_scan_tampered(move || {
-        let qr = m(DEMO_TITLE);
-        let (head, sig) = qr.rsplit_once('.').unwrap();
-        // Flip one character of the signed body: the signature must no longer verify.
-        let mut b: Vec<char> = head.chars().collect();
-        let i = REQ_PREFIX.len() + 30;
-        b[i] = if b[i] == 'A' { 'B' } else { 'A' };
-        h(format!("{}.{}", b.into_iter().collect::<String>(), sig));
-    }); }
-    { let h = handle_scan.clone(); let app = app.clone(); let ui_w = ui.as_weak(); cb.on_scan_replay(move || {
-        let last = app.borrow().last_good_qr.clone();
-        match last { Some(q) => h(q), None => show_error(&ui_w.unwrap(), "Nothing to replay yet", "Answer a demo request first.", "Then try replaying it.") }
-    }); }
+
+    // Real intake: open the system QR scanner. Only plain-text QRs are accepted; everything still goes
+    // through handle_scan (signature, pairing, text, expiry and replay checks).
+    {
+        let h = handle_scan.clone();
+        let ui_w = ui.as_weak();
+        cb.on_scan_request(move || {
+            let h = h.clone();
+            let ui_w = ui_w.clone();
+            slint_keyos_platform::spawn_local(async move {
+                use slint_keyos_platform::gui_server_api::navigation::qrscanner::{ScanQrOptions, ScanQrResult};
+                let opts = ScanQrOptions {
+                    header_title: "Scan request".into(),
+                    message: "Point the camera at your agent's Prime Approve code.".into(),
+                    ..Default::default()
+                };
+                match slint_keyos_platform::navigation::async_open_qr_scanner::<gui_permissions::GuiPermissions>(opts).await {
+                    Ok(Some(ScanQrResult::Qr { data, .. })) => match String::from_utf8(data) {
+                        Ok(text) => h(text),
+                        Err(_) => show_error(&ui_w.unwrap(), "Not a Prime Approve request", "That code isn't text.", "Scan the code your agent shows."),
+                    },
+                    Ok(Some(ScanQrResult::Ur2 { .. })) => show_error(&ui_w.unwrap(), "Not a Prime Approve request", "That looks like a wallet code, not an agent request.", "Scan the code your agent shows."),
+                    Ok(_) => {} // Closed without scanning: stay where we were.
+                    Err(e) => {
+                        log::error!("QR scanner failed: {e:?}");
+                        show_error(&ui_w.unwrap(), "Camera unavailable", "The QR scanner couldn't open.", "Try again in a moment.");
+                    }
+                }
+            }).detach();
+        });
+    }
+
+    #[cfg(feature = "demo")]
+    {
+        let make_demo = {
+            let app = app.clone();
+            move |title: &str| -> String {
+                let a = app.borrow();
+                let mut id = [0u8; 16];
+                getrandom::getrandom(&mut id).expect("TRNG");
+                let req = Request {
+                    id: hex::encode(id),
+                    kid: kid(&a.demo_agent.verifying_key()),
+                    agent: DEMO_AGENT.into(),
+                    title: title.into(),
+                    details: DEMO_DETAILS.into(),
+                    risk: "elevated".into(),
+                    hash: hex::encode(Sha256::digest(DEMO_ACTION)),
+                    exp: now_secs().unwrap_or(0) + 600,
+                    verb: Some("Merge".into()),
+                    object: Some("PR #2".into()),
+                    target: Some("typewright-website-audit".into()),
+                };
+                encode_request(&req, &a.demo_agent)
+            }
+        };
+
+        // Validly signed, but the title carries a right-to-left override that would visually reorder it.
+        { let h = handle_scan.clone(); let m = make_demo.clone(); cb.on_scan_hidden(move || h(m("Merge PR #2 \u{202E}tfard sa evas"))); }
+        { let h = handle_scan.clone(); let m = make_demo.clone(); cb.on_scan_demo(move || h(m(DEMO_TITLE))); }
+        { let h = handle_scan.clone(); let m = make_demo.clone(); cb.on_scan_tampered(move || {
+            let qr = m(DEMO_TITLE);
+            let (head, sig) = qr.rsplit_once('.').unwrap();
+            // Flip one character of the signed body: the signature must no longer verify.
+            let mut b: Vec<char> = head.chars().collect();
+            let i = REQ_PREFIX.len() + 30;
+            b[i] = if b[i] == 'A' { 'B' } else { 'A' };
+            h(format!("{}.{}", b.into_iter().collect::<String>(), sig));
+        }); }
+        { let h = handle_scan.clone(); let app = app.clone(); let ui_w = ui.as_weak(); cb.on_scan_replay(move || {
+            let last = app.borrow().last_good_qr.clone();
+            match last { Some(q) => h(q), None => show_error(&ui_w.unwrap(), "Nothing to replay yet", "Answer a demo request first.", "Then try replaying it.") }
+        }); }
+    }
 
     // Signs the reply, records the decision, and returns the reply QR text.
     let decide = {
@@ -287,8 +332,9 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             a.state.recent.push(Decision { title: req.title.clone(), agent, approved: approve, at: now_secs().unwrap_or(0) });
             if a.state.recent.len() > MAX_RECENT { a.state.recent.remove(0); }
             save(&cx, &a.state);
-            let reply = encode_reply(&req, approve, reason, &a.app_key);
-            let ok = verify_reply(&reply, &a.app_key.verifying_key(), &req.id, &req.kid, &req.hash);
+            let Some(app_key) = a.app_key.clone() else { return false };
+            let reply = encode_reply(&req, approve, reason, &app_key);
+            let ok = verify_reply(&reply, &app_key.verifying_key(), &req.id, &req.kid, &req.hash);
             log::info!("reply {} bytes, decision={}, reason={reason:?}, agent-side verify(approve)={ok}", reply.len(), if approve {"approve"} else {"deny"});
             let (img, info) = qr_image(&reply);
             ui.set_reply_qr(img);
@@ -312,6 +358,46 @@ fn app_main(cx: AppContext, ui: AppWindow) {
     }); }
     { let r = refresh_home.clone(); cb.on_done(move || r()); }
 
+    // Boot step. The app seed can only be fetched once the event loop is running (fetching it before
+    // `ui.run()` hangs on a dark screen), so this single-shot timer fires on the first loop turn.
+    // It derives the signing key, then picks up a request handed over by the Launcher's scanner.
+    let boot = slint::Timer::default();
+    {
+        let ui_w = ui.as_weak();
+        let app = app.clone();
+        let refresh_home = refresh_home.clone();
+        let h = handle_scan.clone();
+        let cx = cx.clone();
+        boot.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(0), move || {
+            let ui = ui_w.unwrap();
+            let seed = match Security::default().app_seed() {
+                Ok(s) => *s.as_bytes(),
+                Err(e) => {
+                    log::error!("GetAppSeed denied: {e:?}");
+                    show_error(&ui, "No app key", "The app key permission was denied, so this app can't sign anything.", "Allow it in Settings, then reopen Prime Approve.");
+                    return;
+                }
+            };
+            // HKDF-SHA256 over the app seed so the signing key is only ever used for Prime Approve replies.
+            let mut okm = [0u8; 32];
+            hkdf::Hkdf::<Sha256>::new(Some(b"prime-approve"), &seed).expand(b"app key v1", &mut okm).expect("32-byte okm");
+            app.borrow_mut().app_key = Some(SigningKey::from_bytes(&okm));
+            refresh_home();
+            // A request scanned from the Launcher arrives as a pending navigation request.
+            if let Ok(Some(bytes)) = cx.gui.navigate_pending() {
+                use slint_keyos_platform::gui_server_api::navigation::qrscanner::{MatchedQrResult, ScanQrResult};
+                match MatchedQrResult::from_slice(&bytes).map(|m| m.scan_result) {
+                    Some(ScanQrResult::Qr { data, .. }) => match String::from_utf8(data) {
+                        Ok(text) => h(text),
+                        Err(_) => show_error(&ui, "Not a Prime Approve request", "That code isn't text.", "Scan the code your agent shows."),
+                    },
+                    _ => log::info!("pending navigation request was not a text QR"),
+                }
+            }
+        });
+    }
+
     ui.run().expect("UI running");
     drop(tick);
+    drop(boot);
 }

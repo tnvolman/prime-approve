@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: 2026 Michael McClanahan
 # SPDX-FileCopyrightText: 2026 Foundation Devices, Inc. <hello@foundation.xyz>
 # SPDX-License-Identifier: MIT
 
@@ -6,6 +7,12 @@ name = "prime-approve"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
+
+[features]
+# Demo build: pairs a demo agent whose private key is public, adds "Demo request" and the
+# security-test buttons, and shows a "Demo key, not secure" banner. Never ship with this on.
+default = []
+demo = []
 
 [workspace]
 exclude = [".foundation-sdk"]

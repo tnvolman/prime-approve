@@ -2,9 +2,22 @@
 
 An offline approval app for Foundation Passport Prime (KeyOS). An AI agent asks for permission with a signed QR code; the human reads the exact request on the Prime and approves or denies; the Prime answers with a signed reply QR the agent must verify before acting. No network, no trading.
 
-Status: simulator demo. Not yet run on hardware (see *Known items to test on hardware*).
+Status: v0.2 in progress, simulator-tested only. Not yet run on hardware (see *Known items to test on hardware*).
+
+**Read [`THREAT_MODEL.md`](THREAT_MODEL.md) first.** It says what an approval proves and what it doesn't, where the trust boundaries are, and which threats are fixed, planned or open.
 
 ## Screenshots (KeyOS simulator, color-corrected)
+
+**v0.2 (October 17, 2026):** a default build (no demo agent, no demo key), a demo build with its warning banner, the demo request (high impact set by the Merge verb), and the system QR scanner opened by **Scan request**. The recent-decisions rows are left over from earlier simulator runs.
+
+<p>
+<img src="shots/v0.2/home-default.png" width="200" alt="Default build home: no agent paired">
+<img src="shots/v0.2/demo-home.png" width="200" alt="Demo build home with the Demo key, not secure banner">
+<img src="shots/v0.2/demo-review.png" width="200" alt="Demo request review: Merge PR #2, action code 1594 E5CC">
+<img src="shots/v0.2/scanner.png" width="200" alt="System QR scanner opened from Scan request">
+</p>
+
+Earlier v0.1 screenshots:
 
 | Home | Review | Approved reply |
 |---|---|---|
@@ -60,7 +73,7 @@ App key: Ed25519 from HKDF-SHA256 (salt `prime-approve`, ikm = the KeyOS app see
 
 ## Structured summary line
 
-When a request carries `verb`, `object` and `target`, the Prime draws one line inside the trusted frame, for example **Merge → PR #3 → typewright-website-audit**.
+When a request carries `verb`, `object` and `target`, the Prime draws one line inside the trusted frame, for example **Merge → PR #2 → typewright-website-audit**.
 
 - `verb` must be one of: `Merge`, `Deploy`, `Publish`, `Delete`, `Send`, `Pay`, `Sign`, `Run`, `Grant`, `Change`.
 - `object` can be up to 24 chars and `target` up to 40. Both use ASCII letters, digits, space and `# . _ / : @ -` only, with no leading or trailing spaces.
@@ -75,7 +88,7 @@ Under the 8-character action code, the Review screen shows 8 colored shapes. The
 **Rule** (`glyphs()` in `src/proto.rs`):
 
 1. Hex-decode the request's `hash` to 32 bytes `h[0..32]`.
-2. The text action code is `h[0..4]` as uppercase hex, split 4 + 4: `BF35 8E2F`.
+2. The text action code is `h[0..4]` as uppercase hex, split 4 + 4: `1594 E5CC`.
 3. Glyph `i` (for `i` = 0 to 7, left to right) comes from byte `b = h[4 + i]`:
    - color id = `b & 7` (the low 3 bits)
    - shape id = `(b >> 3) & 3` (bits 3 and 4)
@@ -104,14 +117,14 @@ The colors are the Okabe-Ito colorblind-safe palette, with white in place of its
 **Test vector** (the simulator demo action; checked by `tests::demo_vector` and by an independent Python check):
 
 ```
-action = {"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":3,"method":"squash"}
+action = {"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}
          (exact bytes, no trailing newline)
-SHA-256 = bf358e2fe2124f3996c349f0eaff5b137d52307d6d31d1d66d4f10785fa6b9df
-code    = BF35 8E2F
-bytes   = e2 12 4f 39 96 c3 49 f0
-ids     = (color, shape) (2,0) (2,2) (7,1) (1,3) (6,2) (3,0) (1,1) (0,2)
-glyphs  = yellow circle, yellow ring, white square, orange outlined square,
-          reddish purple ring, bluish green circle, orange square, vermillion ring
+SHA-256 = 1594e5cc61b278e99dba75aad80d8b2dd41e135820630c1e12584dda3b95d9d8
+code    = 1594 E5CC
+bytes   = 61 b2 78 e9 9d ba 75 aa
+ids     = (color, shape) (1,0) (2,2) (0,3) (1,1) (5,3) (2,3) (5,2) (2,1)
+glyphs  = orange circle, yellow ring, vermillion outlined square, orange square,
+          blue outlined square, yellow outlined square, blue ring, yellow square
 ```
 
 **Colorblind note.** In simulation (Machado 2009 matrices, CIEDE2000), no two of the 8 colors fall below a ΔE00 of 10.9, whether under protanopia, deuteranopia, tritanopia or normal vision. Every color has at least 3.1:1 contrast against the app background. The shapes still do half the work, so the pattern doesn't depend on color alone. This has not yet been checked on a real Prime screen. See `docs/colorblind.md`, which is reproducible with `tools/colorblind.py`.
@@ -153,13 +166,17 @@ These are untested until a dev unit arrives:
   | payload | bytes | QR version | modules |
   |---|---|---|---|
   | request cap (`MAX_QR`) | 800 | 20 | 97×97 |
-  | demo request | 594 | 17 | 85×85 |
+  | demo request | 581 | 17 | 85×85 |
   | approve reply | 416 | 13 | 69×69 |
   | deny reply with a reason | 444 | 14 | 73×73 |
 
   If the Prime camera struggles near 800 bytes, the cap should come down.
-- **Summary fields cost about 90 bytes** of the request budget (the demo is 503 bytes without them, 594 with). Real agents with long titles and details will feel that.
+- **Summary fields cost about 90 bytes** of the request budget (the demo is 490 bytes without them, 581 with). Real agents with long titles and details will feel that.
 - **The colored shapes on a real Prime panel.** Brightness, gamut and viewing angle can shift colors from the simulated values.
+
+## Scanning
+
+**Scan request** opens the system QR scanner (this needs the `ShowModal` permission). A request scanned from the Launcher's own scanner is handed to the app through the `primeapprove:v1:` QR match rule and picked up at launch. Either way, the text goes through the same checks: size, signature, paired agent, plain-ASCII text, expiry no more than 10 minutes out, and single use. The simulator has no camera, so neither path can be exercised there.
 
 ## Build and run (simulator)
 
@@ -168,13 +185,19 @@ Requires the Foundation SDK 1.1.0. From this folder:
     foundation develop
     foundation sim
 
+A default build has no paired agent and no demo key. Pairing is the next planned step.
+
+**Demo build.** Building with the `demo` cargo feature pairs a demo agent whose private key is public (anyone can sign as it), adds a **Demo request** button and, in debug builds, the Tampered, Replay and Hidden text tests. Every screen then shows a red **Demo key · not secure** banner. Never put a demo build on a device you use for real. The demo request is a real, already-merged PR (`tnvolman/typewright-website-audit` #2), pinned to its head commit.
+
 `tools/` holds the scripts used to drive the simulator and take screenshots with `foundation-passport-drive --sim`.
 
-The simulator has no camera, so the demo buttons generate requests on-device using a publicly known demo agent key (sim demo only, never for real use).
+## Forking
+
+Change `app-id` in `app-config.toml`. The app's signing key is derived from the app seed KeyOS gives that app id, so a fork that keeps the id would share key material with this app. Also fill in the `[publisher]` fields with your own details.
 
 ## Tests, docs and tools
 
-- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, and reply signing and verification. They only need `serde`, `serde_json`, `sha2`, `hex`, `base64` and `ed25519-dalek`, so you can run them on a desktop by compiling `proto.rs` in a small host crate.
+- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, reply signing and verification, and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set by the verb). One test, `known_gap_summary_not_bound_to_hash`, deliberately pins the open gap that the summary isn't tied to the hash yet; it gets flipped when the Prime reads the action itself. Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed).
 - `docs/colorblind.md`: the palette check behind the colorblind note.
 - `tools/colorblind.py`: re-runs that check (needs numpy). `--old` shows the previous palette.
 - `tools/*.sh`: simulator driving and screenshot scripts.

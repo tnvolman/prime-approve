@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Michael McClanahan
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { Theme, UISize, Images, ControlSize, ButtonVariant } from "@ui/theme.slint";
 import { Callbacks } from "callbacks.slint";
 import { Button } from "@ui/button.slint";
@@ -60,6 +63,8 @@ export component AppWindow inherits Window {
     // 0 home, 1 review, 2 reply, 3 error, 4 deny reason, 5 unpair prompt
     in-out property <int> page: 0;
     in property <bool> show-dev: false;
+    // Demo builds only (cargo feature "demo"): a demo agent with a public key is paired.
+    in property <bool> demo-mode: false;
     in property <string> agent-name: "";
     in property <string> agent-fp: "";
     in property <bool> has-agent: true;
@@ -91,6 +96,14 @@ export component AppWindow inherits Window {
         padding-bottom: Theme.spacing-xl;
         spacing: Theme.spacing-lg;
 
+        // Shown on every screen of a demo build: anyone can sign as the demo agent.
+        if root.demo-mode: Rectangle {
+            height: 32px;
+            border-radius: 8px;
+            background: Theme.palette-danger;
+            Text { text: "DEMO KEY · NOT SECURE"; color: white; font-family: Theme.font-primary; font-size: Theme.font-size-caption; font-weight: Theme.font-weight-semibold; letter-spacing: 1.5px; horizontal-alignment: center; vertical-alignment: center; }
+        }
+
         // ---------- Home ----------
         if root.page == 0: VerticalLayout {
             spacing: Theme.spacing-lg;
@@ -99,6 +112,11 @@ export component AppWindow inherits Window {
                 width: 100%; full-width: true; size: ControlSize.lg;
                 min-button-height: 112px; font-size: Theme.font-size-title;
                 text: "Scan request";
+                clicked => { Callbacks.scan-request(); }
+            }
+            if root.demo-mode: Button {
+                width: 100%; full-width: true; size: ControlSize.md; variant: ButtonVariant.secondary;
+                text: "Demo request";
                 clicked => { Callbacks.scan-demo(); }
             }
             VerticalLayout {
@@ -129,7 +147,7 @@ export component AppWindow inherits Window {
             }
             if root.show-dev: VerticalLayout {
                 spacing: Theme.spacing-xs;
-                Label { text: "DEV BUILD · SECURITY DEMOS"; horizontal-alignment: center; }
+                Label { text: "DEMO BUILD · SECURITY TESTS"; horizontal-alignment: center; }
                 HorizontalLayout {
                     spacing: Theme.spacing-sm;
                     Button { text: "Tampered"; size: ControlSize.sm; variant: ButtonVariant.secondary; horizontal-stretch: 1; clicked => { Callbacks.scan-tampered(); } }
