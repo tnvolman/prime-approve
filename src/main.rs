@@ -407,6 +407,13 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             getrandom::getrandom(&mut seed).expect("TRNG");
             h(encode_pair_offer(&SigningKey::from_bytes(&seed), now_secs().unwrap_or(0) + 300));
         }); }
+        // Paste (simulator only): typed-in code text goes through the same handler as a scan.
+        { let ui_w = ui.as_weak(); cb.on_open_paste(move || { let ui = ui_w.unwrap(); ui.set_paste_text("".into()); ui.set_page(8); }); }
+        { let h = handle_scan.clone(); cb.on_paste_submit(move |t| {
+            let t = t.trim().to_string();
+            log::info!("pasted code, {} bytes", t.len());
+            h(t);
+        }); }
         { let h = handle_scan.clone(); let app = app.clone(); let ui_w = ui.as_weak(); cb.on_scan_replay(move || {
             let last = app.borrow().last_good_qr.clone();
             match last { Some(q) => h(q), None => show_error(&ui_w.unwrap(), "Nothing to replay yet", "Answer a demo request first.", "Then try replaying it.") }

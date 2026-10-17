@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Michael McClanahan
+# SPDX-License-Identifier: GPL-3.0-or-later
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "primeapprove"
+version = "0.4.0"
+description = "Agent-side library and `pa` CLI for Prime Approve (offline approvals on Passport Prime)"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+dependencies = ["cryptography>=41", "qrcode>=7"]
+
+[project.optional-dependencies]
+# Only needed to read QR codes from photos or screenshots (also works with the zbarimg command).
+photo = ["pillow", "pyzbar"]
+test = ["pytest"]
+
+[project.scripts]
+pa = "primeapprove.cli:main"
+
+[tool.setuptools]
+packages = ["primeapprove"]
