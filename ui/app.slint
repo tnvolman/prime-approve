@@ -1,10 +1,55 @@
 import { Theme, UISize, Images, ControlSize, ButtonVariant } from "@ui/theme.slint";
 import { Callbacks } from "callbacks.slint";
 import { Button } from "@ui/button.slint";
-import { Card } from "@ui/card.slint";
-import { SlideToConfirm } from "@ui/slide_to_confirm.slint";
+import { PremiumSlide } from "premium_slide.slint";
 
 export { Callbacks, Theme, Images, ControlSize }
+
+export struct Glyph { color: color, shape: int }
+export struct Recent { title: string, agent: string, approved: bool, when: string }
+
+// Trusted frame: only app-rendered content (paired name, risk, summary, action code, glyphs, expiry)
+// is ever drawn inside one. Agent free text (title, details) lives in the scroll area between them.
+component TrustedFrame inherits Rectangle {
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.palette-muted.transparentize(0.55);
+    background: Theme.palette-muted.transparentize(0.94);
+}
+
+// Foundation's own warning amber, used only for the elevated-risk band.
+global Brand {
+    out property <color> amber: #d97706;
+    out property <color> ok: #16a34a;
+}
+
+component Label inherits Text {
+    color: Theme.palette-muted;
+    font-family: Theme.font-primary;
+    font-size: Theme.font-size-caption;
+    font-weight: Theme.font-weight-semibold;
+    letter-spacing: 1.5px;
+}
+
+component Body inherits Text {
+    color: Theme.palette-foreground;
+    font-family: Theme.font-primary;
+    font-size: Theme.font-size-body;
+    wrap: word-wrap;
+}
+
+component Mark inherits Rectangle {
+    in property <bool> good: true;
+    in property <length> size: 24px;
+    width: self.size; height: self.size;
+    border-radius: self.size / 2;
+    background: self.good ? Brand.ok : Theme.palette-danger;
+    Image {
+        width: root.size * 0.6; height: root.size * 0.6;
+        source: root.good ? @image-url("../resources/images/mark-check.svg") : @image-url("../resources/images/mark-cross.svg");
+        colorize: white;
+    }
+}
 
 export component AppWindow inherits Window {
     title: "Prime Approve";
@@ -12,92 +57,202 @@ export component AppWindow inherits Window {
     preferred-height: UISize.screen-height;
     background: Theme.palette-background;
 
+    // 0 home, 1 review, 2 reply, 3 error, 4 deny reason, 5 unpair prompt
     in-out property <int> page: 0;
-    in property <string> status-line: "";
-    in property <string> paired-line: "";
-    in property <string> agent-line: "";
+    in property <bool> show-dev: false;
+    in property <string> agent-name: "";
+    in property <string> agent-fp: "";
+    in property <bool> has-agent: true;
+    in property <string> app-key-line: "";
+    in property <[Recent]> recents: [];
+
+    in property <bool> elevated: false;
     in property <string> req-title: "";
     in property <string> req-details: "";
-    in property <string> meta-line: "";
-    in property <string> hash-line: "";
+    in property <string> action-code: "";
+    // App-built from the structured verb/object/target fields; "" when the request has none.
+    in property <string> summary-line: "";
+    in property <[Glyph]> glyphs: [];
+    in property <string> expires-line: "";
     in-out property <bool> read-to-end: false;
-    in property <string> result-line: "";
+
+    in property <bool> approved: false;
     in property <image> reply-qr;
     in property <string> qr-line: "";
+
     in property <string> error-title: "";
     in property <string> error-body: "";
+    in property <string> error-next: "";
 
     VerticalLayout {
         padding-left: Theme.spacing-xl;
         padding-right: Theme.spacing-xl;
-        padding-top: Theme.spacing-lg + UISize.control-center-status-bar-height;
+        padding-top: Theme.spacing-md + UISize.control-center-status-bar-height;
         padding-bottom: Theme.spacing-xl;
         spacing: Theme.spacing-lg;
 
-        Text {
-            text: root.page == 0 ? "PRIME APPROVE" : root.page == 1 ? "REVIEW REQUEST" : root.page == 2 ? "SIGNED REPLY" : "REQUEST REJECTED";
-            color: Theme.palette-muted;
-            font-family: Theme.font-primary;
-            font-size: Theme.font-size-label;
-            font-weight: Theme.font-weight-semibold;
-            horizontal-alignment: center;
-        }
-
+        // ---------- Home ----------
         if root.page == 0: VerticalLayout {
             spacing: Theme.spacing-lg;
-            Card { width: 100%; title: "Paired agents"; body: root.paired-line; footer: root.status-line; }
-            Rectangle { vertical-stretch: 1; }
-            Button { width: 100%; text: "Scan request (demo)"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.scan-demo(); } }
-            Button { width: 100%; text: "Try tampered request"; variant: ButtonVariant.secondary; full-width: true; clicked => { Callbacks.scan-tampered(); } }
-            Button { width: 100%; text: "Try replayed request"; variant: ButtonVariant.secondary; full-width: true; clicked => { Callbacks.scan-replay(); } }
-            Button { width: 100%; text: "Try hidden-text request"; variant: ButtonVariant.secondary; full-width: true; clicked => { Callbacks.scan-hidden(); } }
+            Label { text: "PRIME APPROVE"; horizontal-alignment: center; }
+            Button {
+                width: 100%; full-width: true; size: ControlSize.lg;
+                min-button-height: 112px; font-size: Theme.font-size-title;
+                text: "Scan request";
+                clicked => { Callbacks.scan-demo(); }
+            }
+            VerticalLayout {
+                spacing: Theme.spacing-sm;
+                Label { text: "PAIRED AGENT"; }
+                if root.has-agent: HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    Body { text: root.agent-name; font-weight: Theme.font-weight-semibold; horizontal-stretch: 1; }
+                    Body { text: root.agent-fp; color: Theme.palette-muted; horizontal-stretch: 0; }
+                }
+                if !root.has-agent: Body { text: "No agent paired."; color: Theme.palette-muted; }
+            }
+            VerticalLayout {
+                spacing: Theme.spacing-sm;
+                vertical-stretch: 1;
+                Label { text: "RECENT DECISIONS"; }
+                if root.recents.length == 0: Body { text: "Nothing yet. Requests you answer show up here."; color: Theme.palette-muted; }
+                for r in root.recents: HorizontalLayout {
+                    spacing: Theme.spacing-md;
+                    VerticalLayout { alignment: center; Mark { good: r.approved; size: 22px; } }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        Body { text: r.title; wrap: no-wrap; overflow: elide; }
+                        Body { text: r.agent + " · " + r.when; color: Theme.palette-muted; font-size: Theme.font-size-caption; wrap: no-wrap; overflow: elide; }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+            if root.show-dev: VerticalLayout {
+                spacing: Theme.spacing-xs;
+                Label { text: "DEV BUILD · SECURITY DEMOS"; horizontal-alignment: center; }
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    Button { text: "Tampered"; size: ControlSize.sm; variant: ButtonVariant.secondary; horizontal-stretch: 1; clicked => { Callbacks.scan-tampered(); } }
+                    Button { text: "Replay"; size: ControlSize.sm; variant: ButtonVariant.secondary; horizontal-stretch: 1; clicked => { Callbacks.scan-replay(); } }
+                    Button { text: "Hidden text"; size: ControlSize.sm; variant: ButtonVariant.secondary; horizontal-stretch: 1; clicked => { Callbacks.scan-hidden(); } }
+                }
+            }
+            Text { text: root.app-key-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-xs; horizontal-alignment: center; }
         }
 
+        // ---------- Review ----------
         if root.page == 1: VerticalLayout {
             spacing: Theme.spacing-md;
-            Text { text: root.agent-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-body; wrap: word-wrap; }
             Rectangle {
-                vertical-stretch: 1;
-                border-radius: 16px; border-width: 1px; border-color: Theme.palette-muted.transparentize(0.6);
-                fl := Flickable {
-                    x: 20px; y: 16px; width: parent.width - 40px; height: parent.height - 32px;
-                    viewport-height: body.preferred-height;
-                    property <bool> at-end: self.viewport-height <= self.height + 2px || -self.viewport-y >= self.viewport-height - self.height - 4px;
-                    changed at-end => { if (self.at-end) { root.read-to-end = true; } }
-                    init => { if (self.at-end) { root.read-to-end = true; } }
-                    body := VerticalLayout {
-                        width: fl.width;
-                        spacing: Theme.spacing-sm;
-                        Text { text: root.req-title; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-semibold; wrap: word-wrap; }
-                        Text { text: root.req-details; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-body; wrap: word-wrap; }
-                        Text { text: root.meta-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; wrap: word-wrap; }
+                height: 48px;
+                border-radius: 12px;
+                background: root.elevated ? Brand.amber : Theme.palette-muted.transparentize(0.85);
+                HorizontalLayout {
+                    padding-left: 16px; padding-right: 16px; spacing: 8px;
+                    Text { text: root.agent-name; vertical-alignment: center; horizontal-stretch: 1; overflow: elide;
+                        color: root.elevated ? white : Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-body; font-weight: Theme.font-weight-semibold; }
+                    Text { text: root.elevated ? "High impact · paired" : "paired"; vertical-alignment: center;
+                        color: root.elevated ? white : Brand.ok; font-family: Theme.font-primary; font-size: Theme.font-size-caption; font-weight: Theme.font-weight-semibold; }
+                    VerticalLayout { alignment: center;
+                        Image { width: 18px; height: 18px; source: @image-url("../resources/images/mark-check.svg"); colorize: root.elevated ? white : Brand.ok; }
                     }
                 }
             }
-            Text { text: root.hash-line; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-label; font-weight: Theme.font-weight-semibold; horizontal-alignment: center; wrap: word-wrap; }
-            Text { visible: !root.read-to-end; text: "Scroll to the end to unlock approval"; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; horizontal-alignment: center; }
-            Button { width: 100%; text: "Deny"; variant: ButtonVariant.secondary; full-width: true; clicked => { Callbacks.deny(); } }
-            SlideToConfirm { width: 100%; height: 64px; vertical-stretch: 0; label: ""; hint: "Slide to approve"; confirmed-label: "Approved"; disabled: !root.read-to-end; activated => { Callbacks.approve(); } }
+            fl := Flickable {
+                vertical-stretch: 1;
+                viewport-height: body.preferred-height;
+                property <bool> at-end: self.viewport-height <= self.height + 2px || -self.viewport-y >= self.viewport-height - self.height - 4px;
+                changed at-end => { if (self.at-end) { root.read-to-end = true; } }
+                init => { if (self.at-end) { root.read-to-end = true; } }
+                body := VerticalLayout {
+                    width: fl.width;
+                    spacing: Theme.spacing-sm;
+                    Text { text: root.req-title; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; wrap: word-wrap; }
+                    Body { text: root.req-details; }
+                    Label { text: "END OF REQUEST"; horizontal-alignment: center; }
+                }
+            }
+            TrustedFrame {
+                VerticalLayout {
+                    padding: 10px; spacing: 2px;
+                    if root.summary-line != "": Text {
+                        text: root.summary-line; horizontal-alignment: center; wrap: word-wrap;
+                        color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-body; font-weight: Theme.font-weight-semibold;
+                    }
+                    if root.summary-line != "": Rectangle { height: 1px; background: Theme.palette-muted.transparentize(0.7); }
+                    Label { text: "ACTION CODE"; horizontal-alignment: center; }
+                    Text { text: root.action-code; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: 34px; font-weight: Theme.font-weight-bold; letter-spacing: 3px; horizontal-alignment: center; }
+                    HorizontalLayout {
+                        alignment: center; spacing: 8px; padding-top: 4px; padding-bottom: 4px;
+                        for g in root.glyphs: Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: (g.shape == 0 || g.shape == 2) ? 16px : 5px;
+                            background: (g.shape == 0 || g.shape == 1) ? g.color : transparent;
+                            border-width: (g.shape == 2 || g.shape == 3) ? 6px : 0px;
+                            border-color: g.color;
+                        }
+                    }
+                    Text { text: root.expires-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; horizontal-alignment: center; }
+                }
+            }
+            Text { text: root.read-to-end ? "Check this code matches your agent." : "Scroll to the end to unlock."; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; horizontal-alignment: center; wrap: word-wrap; }
+            PremiumSlide { width: 100%; vertical-stretch: 0; hint: "Slide to approve"; done-hint: "Approved"; disabled: !root.read-to-end; activated => { Callbacks.approve(); } }
+            Button { width: 100%; text: "Deny"; variant: ButtonVariant.ghost; full-width: true; clicked => { Callbacks.deny(); } }
         }
 
+        // ---------- Signed reply ----------
         if root.page == 2: VerticalLayout {
             spacing: Theme.spacing-md;
-            Text { text: root.result-line; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; horizontal-alignment: center; wrap: word-wrap; }
+            HorizontalLayout { alignment: center; Mark { good: root.approved; size: 72px; } }
+            Text { text: root.approved ? "Approved" : "Denied"; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; horizontal-alignment: center; }
+            Text { text: root.action-code; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-md; letter-spacing: 3px; horizontal-alignment: center; }
             HorizontalLayout { alignment: center;
-                Rectangle { width: 300px; height: 300px; background: white; border-radius: 8px;
+                Rectangle { width: 300px; height: 300px; background: white; border-radius: 12px;
                     Image { width: 284px; height: 284px; source: root.reply-qr; image-rendering: pixelated; }
                 }
             }
-            Text { text: root.qr-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-label; horizontal-alignment: center; wrap: word-wrap; }
+            Body { text: "Show this to your agent."; horizontal-alignment: center; font-weight: Theme.font-weight-semibold; }
+            Text { text: root.qr-line; color: Theme.palette-muted; font-family: Theme.font-primary; font-size: Theme.font-size-xs; horizontal-alignment: center; wrap: word-wrap; }
             Rectangle { vertical-stretch: 1; }
             Button { width: 100%; text: "Done"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.done(); } }
         }
 
+        // ---------- Rejected ----------
         if root.page == 3: VerticalLayout {
-            spacing: Theme.spacing-lg;
-            Card { width: 100%; title: root.error-title; body: root.error-body; footer: "Nothing was signed."; }
+            spacing: Theme.spacing-md;
+            Rectangle { height: 24px; }
+            HorizontalLayout { alignment: center; Mark { good: false; size: 72px; } }
+            Text { text: root.error-title; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; horizontal-alignment: center; wrap: word-wrap; }
+            Body { text: root.error-body; horizontal-alignment: center; color: Theme.palette-muted; }
+            Body { text: root.error-next; horizontal-alignment: center; font-weight: Theme.font-weight-semibold; }
+            Label { text: "NOTHING WAS SIGNED"; horizontal-alignment: center; }
             Rectangle { vertical-stretch: 1; }
             Button { width: 100%; text: "Back"; size: ControlSize.lg; full-width: true; clicked => { Callbacks.done(); } }
+        }
+
+        // ---------- Deny reason ----------
+        if root.page == 4: VerticalLayout {
+            spacing: Theme.spacing-md;
+            Rectangle { height: 24px; }
+            Text { text: "Why deny?"; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; horizontal-alignment: center; }
+            Body { text: "Optional. Your agent will see your answer."; color: Theme.palette-muted; horizontal-alignment: center; }
+            Rectangle { height: 8px; }
+            Button { width: 100%; full-width: true; text: "Wrong action"; variant: ButtonVariant.secondary; clicked => { Callbacks.deny-with("wrong_action"); } }
+            Button { width: 100%; full-width: true; text: "Not now"; variant: ButtonVariant.secondary; clicked => { Callbacks.deny-with("not_now"); } }
+            Button { width: 100%; full-width: true; text: "Don't recognize this"; variant: ButtonVariant.secondary; clicked => { Callbacks.deny-with("unrecognized"); } }
+            Rectangle { vertical-stretch: 1; }
+            Button { width: 100%; full-width: true; text: "Skip"; variant: ButtonVariant.ghost; clicked => { Callbacks.deny-with(""); } }
+        }
+
+        // ---------- Unpair prompt ----------
+        if root.page == 5: VerticalLayout {
+            spacing: Theme.spacing-md;
+            Rectangle { height: 24px; }
+            Text { text: "Unpair this agent?"; color: Theme.palette-foreground; font-family: Theme.font-primary; font-size: Theme.font-size-title; font-weight: Theme.font-weight-bold; horizontal-alignment: center; }
+            Body { text: root.agent-name + " won't be able to send you requests until you pair it again."; color: Theme.palette-muted; horizontal-alignment: center; }
+            Rectangle { vertical-stretch: 1; }
+            PremiumSlide { width: 100%; vertical-stretch: 0; hint: "Slide to unpair"; done-hint: "Unpaired"; accent: Theme.palette-danger; activated => { Callbacks.unpair(true); } }
+            Button { width: 100%; full-width: true; text: "Keep paired"; variant: ButtonVariant.ghost; clicked => { Callbacks.unpair(false); } }
         }
     }
 }

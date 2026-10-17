@@ -1,0 +1,75 @@
+import { Theme } from "@ui/theme.slint";
+
+// Slide-to-approve: the knob sits fully inside the track with an even gap,
+// the track fills behind it, it springs back if released early,
+// and it locks with a checkmark at the end.
+export component PremiumSlide inherits Rectangle {
+    in property <string> hint: "Slide to approve";
+    in property <string> done-hint: "Approved";
+    in property <bool> disabled: false;
+    in property <color> accent: Theme.palette-primary;
+    callback activated();
+
+    property <length> gap: 4px;
+    property <length> knob: root.height - 2 * root.gap;
+    property <length> travel: root.width - root.knob - 2 * root.gap;
+    property <length> pos: 0px;
+    property <length> start: 0px;
+    property <bool> done: false;
+
+    height: 64px;
+    border-radius: root.height / 2;
+    background: Theme.palette-muted.transparentize(0.82);
+    clip: true;
+
+    // Fill that follows the knob.
+    Rectangle {
+        x: 0px; y: 0px; height: root.height;
+        width: root.pos + root.knob + 2 * root.gap;
+        border-radius: root.height / 2;
+        background: root.accent.transparentize(root.done ? 0.35 : 0.7);
+        animate width { duration: ta.pressed ? 0ms : 220ms; easing: ease-out; }
+    }
+
+    Text {
+        x: root.knob + 2 * root.gap; width: root.width - root.knob - 4 * root.gap;
+        text: root.done ? root.done-hint : root.hint;
+        color: root.disabled ? Theme.palette-muted : Theme.palette-foreground;
+        font-family: Theme.font-primary; font-size: Theme.font-size-body; font-weight: Theme.font-weight-semibold;
+        horizontal-alignment: center; vertical-alignment: center;
+        opacity: root.done ? 1 : max(0, 1 - root.pos / (root.travel * 0.6));
+        overflow: elide;
+    }
+
+    Rectangle {
+        x: root.gap + root.pos; y: root.gap;
+        width: root.knob; height: root.knob;
+        border-radius: root.knob / 2;
+        background: root.disabled ? Theme.palette-muted.transparentize(0.5) : root.accent;
+        animate x { duration: ta.pressed ? 0ms : 220ms; easing: ease-out; }
+        Image {
+            width: root.knob * 0.42; height: root.knob * 0.42;
+            source: root.done ? @image-url("../resources/images/mark-check.svg") : @image-url("../resources/images/arrow-right.svg");
+            colorize: root.disabled ? Theme.palette-background.transparentize(0.3) : Theme.palette-background;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: !root.disabled && !root.done;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) { root.start = root.pos; }
+            if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                if (root.pos >= root.travel * 0.9) {
+                    root.pos = root.travel;
+                    root.done = true;
+                    root.activated();
+                } else {
+                    root.pos = 0px;
+                }
+            }
+        }
+        moved => {
+            root.pos = clamp(root.start + self.mouse-x - self.pressed-x, 0px, root.travel);
+        }
+    }
+}
