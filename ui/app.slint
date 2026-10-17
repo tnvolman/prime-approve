@@ -160,16 +160,25 @@ export component AppWindow inherits Window {
                 vertical-stretch: 1;
                 Label { text: "RECENT DECISIONS"; }
                 if root.recents.length == 0: Body { text: "Nothing yet. Requests you answer show up here."; color: Theme.palette-muted; }
-                for r in root.recents: HorizontalLayout {
-                    spacing: Theme.spacing-md;
-                    VerticalLayout { alignment: center; Mark { good: r.approved; size: 22px; } }
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        Body { text: r.title; wrap: no-wrap; overflow: elide; }
-                        Body { text: r.agent + " · " + r.when; color: Theme.palette-muted; font-size: Theme.font-size-caption; wrap: no-wrap; overflow: elide; }
+                // Scrolls instead of squeezing the buttons when there are many agents and decisions.
+                rf := Flickable {
+                    vertical-stretch: 1;
+                    viewport-height: rlist.preferred-height;
+                    rlist := VerticalLayout {
+                        width: rf.width;
+                        alignment: start;
+                        spacing: Theme.spacing-sm;
+                        for r in root.recents: HorizontalLayout {
+                            spacing: Theme.spacing-md;
+                            VerticalLayout { alignment: center; Mark { good: r.approved; size: 22px; } }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                Body { text: r.title; wrap: no-wrap; overflow: elide; }
+                                Body { text: r.agent + " · " + r.when; color: Theme.palette-muted; font-size: Theme.font-size-caption; wrap: no-wrap; overflow: elide; }
+                            }
+                        }
                     }
                 }
-                Rectangle { vertical-stretch: 1; }
             }
             if root.show-dev: VerticalLayout {
                 spacing: Theme.spacing-xs;
