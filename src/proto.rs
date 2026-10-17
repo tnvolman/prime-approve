@@ -6,10 +6,11 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const REQ_PREFIX: &str = "primeapprove:v1:";
+/// v2 (item 13): the request carries the raw action bytes; the Prime hashes and parses them itself.
+pub const REQ_PREFIX: &str = "primeapprove:v2:";
 /// Compact reply (item 11): `PA1:` + base45(packed bytes), all QR alphanumeric-mode characters.
 pub const REPLY_PREFIX: &str = "PA1:";
-const REQ_DOMAIN: &[u8] = b"primeapprove-req-v1\n";
+const REQ_DOMAIN: &[u8] = b"primeapprove-req-v2\n";
 const REPLY_DOMAIN: &[u8] = b"primeapprove-reply-v1\n";
 pub const REPLY_VERSION: u8 = 1;
 /// Packed reply: version(1) | decision(1) | request id prefix(8) | time(4, u32 BE unix secs) | sig(64).
@@ -28,13 +29,9 @@ pub const MAX_AGENTS: usize = 5;
 pub const MAX_QR: usize = 800;
 pub const MAX_TITLE: usize = 60;
 pub const MAX_DETAILS: usize = 280;
-/// Structured summary limits (see `summary_line`).
-pub const MAX_OBJECT: usize = 24;
-pub const MAX_TARGET: usize = 40;
-/// The only verbs the summary line may show. Anything else rejects the request.
-pub const VERBS: [&str; 10] = ["Merge", "Deploy", "Publish", "Delete", "Send", "Pay", "Sign", "Run", "Grant", "Change"];
-/// Verbs that always show the "High impact" band, whatever `risk` the agent sent.
-/// The agent can raise a request to elevated, but it can never lower one of these to routine.
+/// Most action bytes a request may carry (the whole QR is still capped at MAX_QR).
+pub const MAX_ACTION: usize = 400;
+/// Verbs that show the "High impact" band. The verb comes from the parsed action, never the agent.
 pub const HIGH_IMPACT_VERBS: [&str; 8] = ["Merge", "Deploy", "Publish", "Delete", "Send", "Pay", "Sign", "Grant"];
 /// A request may not expire more than this far in the future (plus `CLOCK_SKEW_SECS`).
 /// Short windows limit how long a captured request stays usable.
@@ -45,26 +42,37 @@ pub const CLOCK_SKEW_SECS: u64 = 60;
 /// exactly which code would be merged. The agent hashes these exact bytes; the Prime never re-serializes.
 pub const DEMO_ACTION: &[u8] = br#"{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}"#;
 
+/// A request, v2. The agent's own words (`title`, `details`) are shown only as "Agent says". What the
+/// Prime puts in the trusted frame comes from `action`: the exact bytes the agent will run, which the
+/// Prime parses (`action_view`) and hashes (`Request::hash`) itself.
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub id: String,
     pub kid: String,
     pub agent: String,
+    /// Agent's description, may be empty. Shown small, as "Agent says".
     pub title: String,
     pub details: String,
-    /// "routine" or "elevated" (spends money, deletes, merges, sends). Elevated gets an amber band.
-    pub risk: String,
-    pub hash: String,
+    /// The exact action bytes (JSON, printable ASCII). SHA-256 of these bytes is the action hash.
+    pub action: String,
     pub exp: u64,
-    /// Optional structured summary, shown inside the trusted frame as `verb → object → target`.
-    /// All three or none. verb must be one of VERBS; object/target use SUMMARY_CHARS only.
-    /// Still agent-supplied and signed, like the title; the app only constrains how it can look.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verb: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub object: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
+}
+
+impl Request {
+    /// The action hash, computed BY THE PRIME from the bytes it received: SHA-256(action), hex.
+    pub fn hash(&self) -> String {
+        hex::encode(Sha256::digest(self.action.as_bytes()))
+    }
+}
+
+/// What the Prime shows for an action. Built only from the parsed action bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActionView {
+    /// A tool the Prime knows: every field below is derived by the Prime from the action.
+    Known { verb: &'static str, object: String, target: String, detail: String },
+    /// Any other tool: the Prime shows the raw action and always marks it high impact.
+    Unknown { tool: String },
 }
 
 pub const DENY_REASONS: [&str; 3] = ["wrong_action", "not_now", "unrecognized"];
@@ -184,31 +192,75 @@ pub fn glyphs(hash: &str) -> Vec<(u8, u8)> {
     b.iter().skip(4).take(8).map(|x| (x & 7, (x >> 3) & 3)).collect()
 }
 
-/// Characters allowed in summary object/target: ASCII letters, digits, space and `#._/:@-`.
-/// No arrows, so an agent can't fake the app-drawn separator.
-fn summary_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, ' ' | '#' | '.' | '_' | '/' | ':' | '@' | '-')
+// ---------------------------------------------------------------- action registry
+
+/// github.merge_pull_request, the only known tool so far. Unknown fields or duplicate keys reject it
+/// (serde refuses both here), so nothing can hide next to the fields the Prime shows.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergePr {
+    #[allow(dead_code)]
+    tool: String,
+    repo: String,
+    pr: u64,
+    method: String,
+    head: String,
 }
 
-/// Validates the optional summary. Ok(None) when absent, Ok(Some(..)) with the three parts when valid.
-pub fn summary_parts(req: &Request) -> Result<Option<(&str, &str, &str)>, &'static str> {
-    match (req.verb.as_deref(), req.object.as_deref(), req.target.as_deref()) {
-        (None, None, None) => Ok(None),
-        (Some(v), Some(o), Some(t)) => {
-            if !VERBS.contains(&v) { return Err("summary verb not allowed"); }
-            if o.is_empty() || o.len() > MAX_OBJECT || t.is_empty() || t.len() > MAX_TARGET { return Err("summary too long or empty"); }
-            if !o.chars().all(summary_char) || !t.chars().all(summary_char) { return Err("summary has disallowed characters"); }
-            if o.trim() != o || t.trim() != t { return Err("summary has extra spaces"); }
-            Ok(Some((v, o, t)))
+/// `owner/name`, GitHub's characters only.
+fn valid_repo(r: &str) -> bool {
+    let mut parts = r.split('/');
+    let ok = |p: &str| !p.is_empty() && p.len() <= 100 && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) && p != "." && p != "..";
+    matches!((parts.next(), parts.next(), parts.next()), (Some(o), Some(n), None) if ok(o) && ok(n)) && r.len() <= 64
+}
+
+/// Action bytes: printable ASCII plus newline, at most MAX_ACTION bytes.
+fn action_text_ok(a: &str) -> bool {
+    !a.is_empty() && a.len() <= MAX_ACTION && a.chars().all(|c| c == '\n' || (' '..='~').contains(&c))
+}
+
+/// Parses the action bytes into what the Prime shows. Err for anything the Prime must refuse:
+/// oversized, non-ASCII, not a JSON object with a string "tool", or a known tool with bad fields.
+pub fn action_view(action: &str) -> Result<ActionView, &'static str> {
+    if !action_text_ok(action) { return Err("action must be printable ASCII JSON of 400 bytes or less"); }
+    let v: serde_json::Value = serde_json::from_str(action).map_err(|_| "action is not valid JSON")?;
+    let tool = v.as_object().and_then(|o| o.get("tool")).and_then(|t| t.as_str()).ok_or("action needs a string \"tool\"")?;
+    match tool {
+        "github.merge_pull_request" => {
+            let m: MergePr = serde_json::from_str(action).map_err(|_| "merge action has missing, extra or repeated fields")?;
+            if !valid_repo(&m.repo) { return Err("merge action repo must be owner/name"); }
+            if !matches!(m.method.as_str(), "merge" | "squash" | "rebase") { return Err("merge method must be merge, squash or rebase"); }
+            if m.head.len() != 40 || !m.head.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) { return Err("merge head must be a 40-char lowercase commit SHA"); }
+            if m.pr == 0 { return Err("merge pr must be a positive number"); }
+            Ok(ActionView::Known { verb: "Merge", object: format!("PR #{}", m.pr), target: m.repo, detail: format!("{} merge at {}", m.method, &m.head[..7]) })
         }
-        _ => Err("summary needs verb, object and target together"),
+        _ => Ok(ActionView::Unknown { tool: tool.to_string() }),
     }
 }
 
-/// The one-line summary the app draws, e.g. "Merge → PR #2 → typewright-website-audit".
-/// The arrows are added here; agents can't send them.
-pub fn summary_line(req: &Request) -> Option<String> {
-    summary_parts(req).ok().flatten().map(|(v, o, t)| format!("{v} → {o} → {t}"))
+/// The one-line summary inside the trusted frame, e.g. "Merge → PR #2 → tnvolman/typewright-website-audit".
+/// Known tools only; built from the parsed action.
+pub fn summary_line(view: &ActionView) -> Option<String> {
+    match view {
+        ActionView::Known { verb, object, target, .. } => Some(format!("{verb} → {object} → {target}")),
+        ActionView::Unknown { .. } => None,
+    }
+}
+
+/// Whether the Review screen shows "High impact": the parsed verb decides, and unknown actions always are.
+pub fn is_elevated(view: &ActionView) -> bool {
+    match view {
+        ActionView::Known { verb, .. } => HIGH_IMPACT_VERBS.contains(verb),
+        ActionView::Unknown { .. } => true,
+    }
+}
+
+/// The raw action wrapped at `width` characters, for the unknown-action view (display only).
+pub fn wrap_raw(action: &str, width: usize) -> String {
+    action.lines().flat_map(|l| {
+        let c: Vec<char> = l.chars().collect();
+        if c.is_empty() { vec![String::new()] } else { c.chunks(width).map(|x| x.iter().collect()).collect() }
+    }).collect::<Vec<String>>().join("\n")
 }
 
 pub fn fingerprint(pk: &VerifyingKey) -> String {
@@ -229,12 +281,6 @@ pub fn text_is_safe(title: &str, details: &str) -> bool {
     !title.chars().any(|c| unsafe_char(c, false)) && !details.chars().any(|c| unsafe_char(c, true))
 }
 
-/// Whether the Review screen shows the "High impact" band. The verb decides when there is one;
-/// the agent's `risk` can only raise it.
-pub fn is_elevated(req: &Request) -> bool {
-    req.risk == "elevated" || req.verb.as_deref().is_some_and(|v| HIGH_IMPACT_VERBS.contains(&v))
-}
-
 /// Time checks, run after `decode_request` once the clock is known.
 pub fn check_time(req: &Request, now: u64) -> Result<(), Reject> {
     check_exp(req.exp, now)
@@ -252,7 +298,7 @@ pub fn encode_request(req: &Request, agent: &SigningKey) -> String {
     format!("{REQ_PREFIX}{}.{}", B64.encode(&body), B64.encode(sig.to_bytes()))
 }
 
-pub fn decode_request<'a>(qr: &str, agents: &'a [Agent]) -> Result<(Request, &'a Agent), Reject> {
+pub fn decode_request<'a>(qr: &str, agents: &'a [Agent]) -> Result<(Request, ActionView, &'a Agent), Reject> {
     if qr.len() > MAX_QR { return Err(Reject::TooLarge(qr.len())); }
     let rest = qr.strip_prefix(REQ_PREFIX).ok_or(Reject::Malformed("wrong prefix"))?;
     let (b, s) = rest.split_once('.').ok_or(Reject::Malformed("missing signature"))?;
@@ -266,12 +312,11 @@ pub fn decode_request<'a>(qr: &str, agents: &'a [Agent]) -> Result<(Request, &'a
     // The signed kid must name the key that actually signed it.
     if req.kid != agent.kid { return Err(Reject::UnknownAgent); }
     if req.id.len() != 32 || hex::decode(&req.id).is_err() { return Err(Reject::Malformed("request id must be 128-bit hex")); }
-    if req.hash.len() != 64 || hex::decode(&req.hash).is_err() { return Err(Reject::Malformed("action hash must be SHA-256 hex")); }
     if req.title.chars().count() > MAX_TITLE || req.details.chars().count() > MAX_DETAILS { return Err(Reject::Malformed("title or details too long")); }
-    if req.risk != "routine" && req.risk != "elevated" { return Err(Reject::Malformed("risk must be routine or elevated")); }
     if !text_is_safe(&req.title, &req.details) || req.agent.chars().any(|c| unsafe_char(c, false)) { return Err(Reject::UnsafeText); }
-    summary_parts(&req).map_err(Reject::Malformed)?;
-    Ok((req, agent))
+    if req.action.chars().any(|c| unsafe_char(c, true)) { return Err(Reject::UnsafeText); }
+    let view = action_view(&req.action).map_err(Reject::Malformed)?;
+    Ok((req, view, agent))
 }
 
 // ---------------------------------------------------------------- base45 (RFC 9285)
@@ -329,8 +374,9 @@ pub fn encode_reply(req: &Request, approve: bool, reason: Option<&str>, app: &Si
     } else {
         reason.and_then(|r| DENY_REASONS.iter().position(|x| *x == r)).map_or(DECISION_DENY, |i| DECISION_DENY_REASON0 + i as u8)
     };
-    // decode_request already checked id is 32 hex chars, hash 64 and kid matches the agent key.
-    let (id, kid, hash) = (fixed::<16>(&req.id).expect("id"), fixed::<8>(&req.kid).expect("kid"), fixed::<32>(&req.hash).expect("hash"));
+    // decode_request already checked id is 32 hex chars and kid matches the agent key.
+    // The Prime signs the hash IT computed from the action bytes, never one the agent sent.
+    let (id, kid, hash) = (fixed::<16>(&req.id).expect("id"), fixed::<8>(&req.kid).expect("kid"), fixed::<32>(&req.hash()).expect("hash"));
     let at = u32::try_from(at).unwrap_or(0);
     let sig = app.sign(&reply_message(REPLY_VERSION, decision, &id, &kid, &hash, at));
     let mut packed = Vec::with_capacity(REPLY_LEN);
@@ -509,7 +555,7 @@ mod tests {
         assert_eq!(glyphs(&h.to_uppercase()), glyphs(&h));
     }
 
-    fn demo_req(verb: Option<&str>, object: Option<&str>, target: Option<&str>) -> (Request, SigningKey) {
+    fn demo_req() -> (Request, SigningKey) {
         let sk = SigningKey::from_bytes(&Sha256::digest(b"prime-approve DEMO agent key - public, never use for real").into());
         let req = Request {
             id: "00112233445566778899aabbccddeeff".into(),
@@ -517,71 +563,135 @@ mod tests {
             agent: "Cos (demo agent)".into(),
             title: "Merge PR #2 into main".into(),
             details: "Squash merge at 33393c6.\n10 files changed.".into(),
-            risk: "elevated".into(),
-            hash: DEMO_HASH.into(),
+            action: std::str::from_utf8(DEMO_ACTION).unwrap().into(),
             exp: 1_792_000_000,
-            verb: verb.map(Into::into), object: object.map(Into::into), target: target.map(Into::into),
         };
         (req, sk)
     }
 
-    #[test]
-    fn summary_roundtrip_and_size() {
-        let (req, sk) = demo_req(Some("Merge"), Some("PR #2"), Some("typewright-website-audit"));
-        let qr = encode_request(&req, &sk);
-        println!("demo request with summary: {} bytes (cap {MAX_QR})", qr.len());
-        assert!(qr.len() <= 600, "demo request is {} bytes; keep it <= 600 for real-camera scanning", qr.len());
-        let agents = [Agent::new("Cos (demo agent)", sk.verifying_key())];
-        let (r, _) = decode_request(&qr, &agents).expect("valid");
-        assert_eq!(summary_line(&r).as_deref(), Some("Merge → PR #2 → typewright-website-audit"));
+    // ---- What the Prime shows (item 13): parsed from the action, hashed by the Prime ----
 
-        let (plain, sk) = demo_req(None, None, None);
-        let qr = encode_request(&plain, &sk);
-        println!("demo request without summary: {} bytes", qr.len());
-        let (r, _) = decode_request(&qr, &agents).expect("old format still valid");
-        assert_eq!(summary_line(&r), None);
+    #[test]
+    fn known_tool_shows_parsed_fields_and_size() {
+        let (req, sk) = demo_req();
+        let qr = encode_request(&req, &sk);
+        println!("demo request: {} bytes (cap {MAX_QR})", qr.len());
+        assert!(qr.len() <= 650, "demo request is {} bytes", qr.len());
+        let agents = [Agent::new("Cos (demo agent)", sk.verifying_key())];
+        let (r, view, _) = decode_request(&qr, &agents).expect("valid");
+        assert_eq!(view, ActionView::Known { verb: "Merge", object: "PR #2".into(), target: "tnvolman/typewright-website-audit".into(), detail: "squash merge at 33393c6".into() });
+        assert_eq!(summary_line(&view).as_deref(), Some("Merge → PR #2 → tnvolman/typewright-website-audit"));
+        assert!(is_elevated(&view));
+        assert_eq!(r.hash(), DEMO_HASH, "the Prime computes the hash from the action bytes");
     }
 
     #[test]
-    fn summary_rejects_bad_input() {
-        let (req, sk) = demo_req(Some("Merge"), Some("PR #2"), Some("typewright-website-audit"));
+    fn lying_title_cannot_change_the_band() {
+        let (mut req, sk) = demo_req();
         let agents = [Agent::new("x", sk.verifying_key())];
-        let long = "x".repeat(MAX_OBJECT + 1);
-        let bad = [
-            (Some("Approve"), Some("PR #2"), Some("t")),            // verb not on the list
-            (Some("Merge"), Some("PR → #2"), Some("t")),            // fake separator
-            (Some("Merge"), Some("PR #2"), Some("a\u{202E}b")),     // bidi override
-            (Some("Merge"), Some("PR #2"), None),                   // partial
-            (Some("Merge"), Some(" PR #2"), Some("t")),             // padding
-            (Some("Merge"), Some(long.as_str()), Some("t")), // too long
+        // The agent says "Merge PR #2" but the action merges PR #9 somewhere else.
+        req.title = "Merge PR #2 into main".into();
+        req.details = "Merge -> PR #2 -> tnvolman/typewright-website-audit".into();
+        req.action = r#"{"tool":"github.merge_pull_request","repo":"evil/other-repo","pr":9,"method":"merge","head":"0000000000000000000000000000000000000001"}"#.into();
+        let (r, view, _) = decode_request(&encode_request(&req, &sk), &agents).unwrap();
+        assert_eq!(summary_line(&view).as_deref(), Some("Merge → PR #9 → evil/other-repo"));
+        assert_ne!(r.hash(), DEMO_HASH);
+        assert_eq!(r.hash(), hex::encode(Sha256::digest(req.action.as_bytes())));
+        // A reply binds the hash of what was shown, not of anything the agent claimed.
+        let app = SigningKey::from_bytes(&[7u8; 32]);
+        let reply = encode_reply(&r, true, None, &app, AT);
+        assert!(!verify_reply(&reply, &app.verifying_key(), &r.id, &r.kid, DEMO_HASH));
+        assert!(verify_reply(&reply, &app.verifying_key(), &r.id, &r.kid, &r.hash()));
+    }
+
+    #[test]
+    fn unknown_tool_gets_raw_view_and_high_impact() {
+        let (mut req, sk) = demo_req();
+        let agents = [Agent::new("x", sk.verifying_key())];
+        req.title = "Run the unit tests".into();
+        req.action = r#"{"tool":"github.delete_repo","repo":"tnvolman/typewright-website-audit"}"#.into();
+        let (_, view, _) = decode_request(&encode_request(&req, &sk), &agents).unwrap();
+        assert_eq!(view, ActionView::Unknown { tool: "github.delete_repo".into() });
+        assert!(is_elevated(&view), "unknown is always high impact");
+        assert_eq!(summary_line(&view), None);
+        assert_eq!(wrap_raw("abcdefgh\nij", 3), "abc\ndef\ngh\nij");
+    }
+
+    #[test]
+    fn bad_actions_are_rejected() {
+        let (req, sk) = demo_req();
+        let agents = [Agent::new("x", sk.verifying_key())];
+        let head = "33393c61b3e595bfb83bb9b909e280b2f40f0976";
+        let big = format!(r#"{{"tool":"x","pad":"{}"}}"#, "a".repeat(MAX_ACTION));
+        let bad: Vec<String> = vec![
+            "not json".into(),
+            "".into(),
+            "[1,2]".into(),
+            r#"{"tool":7}"#.into(),
+            r#"{"repo":"a/b"}"#.into(),
+            big,
+            "{\"tool\":\"x\",\"t\":\"caf\u{e9}\"}".into(),
+            "{\"tool\":\"x\",\"t\":\"a\tb\"}".into(),
+            // Known tool with bad fields: each must reject, never fall back to a friendlier view.
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash","head":"{head}","delete_branch":true}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","repo":"c/d","pr":2,"method":"squash","head":"{head}"}}"#),
+            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash"}"#.into(),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":"2","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2.5,"method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":0,"method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"force","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a b/c","pr":2,"method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b/c","pr":2,"method":"squash","head":"{head}"}}"#),
+            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash","head":"33393C61B3E595BFB83BB9B909E280B2F40F0976"}"#.into(),
+            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash","head":"33393c6"}"#.into(),
         ];
-        for (v, o, t) in bad {
+        for a in bad {
             let mut r = req.clone();
-            r.verb = v.map(Into::into); r.object = o.map(Into::into); r.target = t.map(Into::into);
-            let qr = encode_request(&r, &sk);
-            assert!(matches!(decode_request(&qr, &agents), Err(Reject::Malformed(_))), "{v:?} {o:?} {t:?}");
+            r.action = a.clone();
+            let res = decode_request(&encode_request(&r, &sk), &agents);
+            assert!(matches!(res, Err(Reject::Malformed(_)) | Err(Reject::UnsafeText) | Err(Reject::TooLarge(_))), "{a:?} gave {:?}", res.map(|x| x.1));
         }
+        // Pretty-printed JSON with newlines is fine; the hash covers the exact bytes.
+        let mut r = req.clone();
+        r.action = format!("{{\n \"tool\": \"github.merge_pull_request\",\n \"repo\": \"a/b\", \"pr\": 2,\n \"method\": \"rebase\", \"head\": \"{head}\"\n}}");
+        let (r2, v, _) = decode_request(&encode_request(&r, &sk), &agents).unwrap();
+        assert_eq!(summary_line(&v).as_deref(), Some("Merge → PR #2 → a/b"));
+        assert_eq!(r2.hash(), hex::encode(Sha256::digest(r.action.as_bytes())));
+    }
+
+    #[test]
+    fn request_rejects_unknown_fields_and_v1() {
+        // An old v1-style field (an agent-supplied hash) is refused, not ignored.
+        let (req, sk) = demo_req();
+        let mut v = serde_json::to_value(&req).unwrap();
+        v["hash"] = serde_json::json!(DEMO_HASH);
+        let body = serde_json::to_vec(&v).unwrap();
+        let sig = sk.sign(&[REQ_DOMAIN, &body].concat());
+        let qr = format!("{REQ_PREFIX}{}.{}", B64.encode(&body), B64.encode(sig.to_bytes()));
+        let agents = [Agent::new("x", sk.verifying_key())];
+        assert!(matches!(decode_request(&qr, &agents), Err(Reject::Malformed(_))));
+        assert!(matches!(decode_request(&qr.replacen("primeapprove:v2:", "primeapprove:v1:", 1), &agents), Err(Reject::Malformed(_))));
     }
 
     const AT: u64 = 1_800_000_000;
 
     #[test]
     fn approve_reply_verifies_and_deny_does_not() {
-        let (req, _) = demo_req(None, None, None);
+        let (req, _) = demo_req();
         let app = SigningKey::from_bytes(&[7u8; 32]);
         let pk = app.verifying_key();
         let ok = encode_reply(&req, true, Some("not_now"), &app, AT);
-        assert!(verify_reply(&ok, &pk, &req.id, &req.kid, &req.hash));
+        assert!(verify_reply(&ok, &pk, &req.id, &req.kid, &req.hash()));
         // A reason is never carried on an approve.
-        assert_eq!(decode_reply(&ok, &pk, &req.id, &req.kid, &req.hash), Some(ReplyInfo { approved: true, reason: None, at: AT as u32 }));
+        assert_eq!(decode_reply(&ok, &pk, &req.id, &req.kid, &req.hash()), Some(ReplyInfo { approved: true, reason: None, at: AT as u32 }));
         for (i, r) in DENY_REASONS.iter().enumerate() {
             let no = encode_reply(&req, false, Some(r), &app, AT);
-            assert_eq!(decode_reply(&no, &pk, &req.id, &req.kid, &req.hash).unwrap().reason, Some(DENY_REASONS[i]));
-            assert!(!verify_reply(&no, &pk, &req.id, &req.kid, &req.hash), "a deny never verifies as approve");
+            assert_eq!(decode_reply(&no, &pk, &req.id, &req.kid, &req.hash()).unwrap().reason, Some(DENY_REASONS[i]));
+            assert!(!verify_reply(&no, &pk, &req.id, &req.kid, &req.hash()), "a deny never verifies as approve");
         }
         // Unknown reasons are dropped, not signed.
         let no = encode_reply(&req, false, Some("because"), &app, AT);
-        assert_eq!(decode_reply(&no, &pk, &req.id, &req.kid, &req.hash), Some(ReplyInfo { approved: false, reason: None, at: AT as u32 }));
+        assert_eq!(decode_reply(&no, &pk, &req.id, &req.kid, &req.hash()), Some(ReplyInfo { approved: false, reason: None, at: AT as u32 }));
     }
 
     // ---- Compact reply (item 11) ----
@@ -601,7 +711,7 @@ mod tests {
 
     #[test]
     fn compact_reply_roundtrip() {
-        let (req, _) = demo_req(None, None, None);
+        let (req, _) = demo_req();
         let app = SigningKey::from_bytes(&[7u8; 32]);
         let qr = encode_reply(&req, true, None, &app, AT);
         assert!(qr.starts_with(REPLY_PREFIX));
@@ -612,29 +722,29 @@ mod tests {
         assert_eq!(&raw[..2], &[REPLY_VERSION, DECISION_APPROVE]);
         assert_eq!(hex::encode(&raw[2..10]), &req.id[..16], "8-byte request id prefix");
         assert_eq!(u32::from_be_bytes(raw[10..14].try_into().unwrap()), AT as u32);
-        assert!(verify_reply(&qr, &app.verifying_key(), &req.id, &req.kid, &req.hash));
+        assert!(verify_reply(&qr, &app.verifying_key(), &req.id, &req.kid, &req.hash()));
         // Upper-case hex from the agent is fine too.
-        assert!(verify_reply(&qr, &app.verifying_key(), &req.id.to_uppercase(), &req.kid, &req.hash.to_uppercase()));
+        assert!(verify_reply(&qr, &app.verifying_key(), &req.id.to_uppercase(), &req.kid, &req.hash().to_uppercase()));
         // Unknown clock signs time 0, and still verifies.
         let q0 = encode_reply(&req, true, None, &app, 0);
-        assert_eq!(decode_reply(&q0, &app.verifying_key(), &req.id, &req.kid, &req.hash).unwrap().at, 0);
+        assert_eq!(decode_reply(&q0, &app.verifying_key(), &req.id, &req.kid, &req.hash()).unwrap().at, 0);
     }
 
     /// Fixed test vector for other implementations (tools/decode_reply.py is checked against it).
     /// App key: SigningKey::from_bytes(&[7; 32]) (a public TEST key). Request: `demo_req`, signed at AT.
     #[test]
     fn compact_reply_test_vector() {
-        let (req, _) = demo_req(None, None, None);
+        let (req, _) = demo_req();
         let app = SigningKey::from_bytes(&[7u8; 32]);
         let qr = encode_reply(&req, true, None, &app, AT);
-        println!("vector app_pk={} id={} kid={} hash={} reply={qr}", hex::encode(app.verifying_key().as_bytes()), req.id, req.kid, req.hash);
+        println!("vector app_pk={} id={} kid={} hash={} reply={qr}", hex::encode(app.verifying_key().as_bytes()), req.id, req.kid, req.hash());
         assert_eq!(qr, REPLY_VECTOR);
     }
     const REPLY_VECTOR: &str = "PA1:W50H00PE4XS8-.CFPDUOQ65F+%N1KSUHI911B:D891NZDPID5VRFZKBHEDAB%W1J9QPKTOSI$6F+8KX.AO5MEC3IQG$A9QIB%UN/R70-F*XC7+DC PAW7";
 
     #[test]
     fn compact_reply_tamper_fails() {
-        let (req, _) = demo_req(None, None, None);
+        let (req, _) = demo_req();
         let app = SigningKey::from_bytes(&[7u8; 32]);
         let pk = app.verifying_key();
         let qr = encode_reply(&req, true, None, &app, AT);
@@ -645,59 +755,59 @@ mod tests {
                 let mut t = raw.clone();
                 t[i] ^= 1 << bit;
                 let q = format!("{REPLY_PREFIX}{}", base45_encode(&t));
-                assert!(decode_reply(&q, &pk, &req.id, &req.kid, &req.hash).is_none(), "byte {i} bit {bit}");
+                assert!(decode_reply(&q, &pk, &req.id, &req.kid, &req.hash()).is_none(), "byte {i} bit {bit}");
             }
         }
         // A deny can't be turned into an approve by editing the decision byte.
         let no = encode_reply(&req, false, Some("wrong_action"), &app, AT);
         let mut t = base45_decode(&no[REPLY_PREFIX.len()..]).unwrap();
         t[1] = DECISION_APPROVE;
-        assert!(!verify_reply(&format!("{REPLY_PREFIX}{}", base45_encode(&t)), &pk, &req.id, &req.kid, &req.hash));
+        assert!(!verify_reply(&format!("{REPLY_PREFIX}{}", base45_encode(&t)), &pk, &req.id, &req.kid, &req.hash()));
         // Truncated, extended, wrong prefix, wrong version, garbage.
-        assert!(!verify_reply(&qr[..qr.len() - 3], &pk, &req.id, &req.kid, &req.hash));
-        assert!(!verify_reply(&format!("{qr}000"), &pk, &req.id, &req.kid, &req.hash));
-        assert!(!verify_reply(&qr.replacen("PA1:", "PA2:", 1), &pk, &req.id, &req.kid, &req.hash));
+        assert!(!verify_reply(&qr[..qr.len() - 3], &pk, &req.id, &req.kid, &req.hash()));
+        assert!(!verify_reply(&format!("{qr}000"), &pk, &req.id, &req.kid, &req.hash()));
+        assert!(!verify_reply(&qr.replacen("PA1:", "PA2:", 1), &pk, &req.id, &req.kid, &req.hash()));
         let mut t = raw.clone(); t[0] = 2;
-        assert!(!verify_reply(&format!("{REPLY_PREFIX}{}", base45_encode(&t)), &pk, &req.id, &req.kid, &req.hash));
-        assert!(!verify_reply("PA1:hello", &pk, &req.id, &req.kid, &req.hash));
+        assert!(!verify_reply(&format!("{REPLY_PREFIX}{}", base45_encode(&t)), &pk, &req.id, &req.kid, &req.hash()));
+        assert!(!verify_reply("PA1:hello", &pk, &req.id, &req.kid, &req.hash()));
     }
 
     #[test]
     fn compact_reply_wrong_pinned_key_fails() {
-        let (req, _) = demo_req(None, None, None);
+        let (req, _) = demo_req();
         let (app, impostor) = (SigningKey::from_bytes(&[7u8; 32]), SigningKey::from_bytes(&[9u8; 32]));
         let fake = encode_reply(&req, true, None, &impostor, AT);
-        assert!(!verify_reply(&fake, &app.verifying_key(), &req.id, &req.kid, &req.hash));
-        assert!(decode_reply(&fake, &app.verifying_key(), &req.id, &req.kid, &req.hash).is_none());
+        assert!(!verify_reply(&fake, &app.verifying_key(), &req.id, &req.kid, &req.hash()));
+        assert!(decode_reply(&fake, &app.verifying_key(), &req.id, &req.kid, &req.hash()).is_none());
     }
 
     #[test]
     fn compact_reply_wrong_request_fails() {
-        let (req, _) = demo_req(None, None, None);
+        let (req, _) = demo_req();
         let app = SigningKey::from_bytes(&[7u8; 32]);
         let pk = app.verifying_key();
         let qr = encode_reply(&req, true, None, &app, AT);
         // Wrong action hash: only the full hash, never sent, is bound in the signature.
         let other = hex::encode(Sha256::digest(b"some other action"));
         assert!(!verify_reply(&qr, &pk, &req.id, &req.kid, &other));
-        let mut h = req.hash.clone().into_bytes(); h[63] = if h[63] == b'0' { b'1' } else { b'0' };
+        let mut h = req.hash().into_bytes(); h[63] = if h[63] == b'0' { b'1' } else { b'0' };
         assert!(!verify_reply(&qr, &pk, &req.id, &req.kid, std::str::from_utf8(&h).unwrap()), "last hash byte changed");
         // Same 8-byte id prefix, different tail: the full id is signed.
         let id2 = format!("{}{}", &req.id[..16], "ffffffffffffffff");
-        assert!(!verify_reply(&qr, &pk, &id2, &req.kid, &req.hash));
+        assert!(!verify_reply(&qr, &pk, &id2, &req.kid, &req.hash()));
         // Different id prefix.
-        assert!(!verify_reply(&qr, &pk, &"0".repeat(32), &req.kid, &req.hash));
+        assert!(!verify_reply(&qr, &pk, &"0".repeat(32), &req.kid, &req.hash()));
         // Different agent kid.
-        assert!(!verify_reply(&qr, &pk, &req.id, &kid(&agent_sk(3).verifying_key()), &req.hash));
+        assert!(!verify_reply(&qr, &pk, &req.id, &kid(&agent_sk(3).verifying_key()), &req.hash()));
         // Malformed expectations never verify.
-        assert!(!verify_reply(&qr, &pk, "xyz", &req.kid, &req.hash));
+        assert!(!verify_reply(&qr, &pk, "xyz", &req.kid, &req.hash()));
     }
 
     // ---- Review findings (Oct 17, 2026). Each test guards a fix, or pins a known gap. ----
 
     #[test]
     fn display_text_is_an_allowlist() {
-        let (req, sk) = demo_req(None, None, None);
+        let (req, sk) = demo_req();
         let agents = [Agent::new("x", sk.verifying_key())];
         // Each of these passed the old denylist.
         for bad in ["\u{2028}", "\u{00AD}", "\u{E0041}", "\u{0430}", "\u{3164}", "\u{2800}", "\u{202E}", "\t"] {
@@ -715,7 +825,7 @@ mod tests {
 
     #[test]
     fn expiry_is_capped() {
-        let (mut req, _) = demo_req(None, None, None);
+        let (mut req, _) = demo_req();
         let now = 1_800_000_000;
         req.exp = now + 600;
         assert!(check_time(&req, now).is_ok());
@@ -726,33 +836,15 @@ mod tests {
     }
 
     #[test]
-    fn high_impact_verbs_cannot_be_downgraded() {
-        for v in HIGH_IMPACT_VERBS {
-            let (mut r, _) = demo_req(Some(v), Some("x"), Some("y"));
-            r.risk = "routine".into();
-            assert!(is_elevated(&r), "{v}");
-        }
-        let (mut r, _) = demo_req(Some("Run"), Some("tests"), Some("ci"));
-        r.risk = "routine".into();
-        assert!(!is_elevated(&r));
-        r.risk = "elevated".into();
-        assert!(is_elevated(&r), "agent may raise");
-    }
-
-    /// KNOWN GAP (plan item 13): the summary is written by the agent and is not tied to the hash,
-    /// so a "Merge PR #2" panel can carry the hash of a repo deletion. Flip this test when the Prime
-    /// parses the action bytes itself.
-    #[test]
-    fn known_gap_summary_not_bound_to_hash() {
-        let (mut r, sk) = demo_req(Some("Merge"), Some("PR #2"), Some("typewright-website-audit"));
-        r.hash = hex::encode(Sha256::digest(br#"{"tool":"github.delete_repo","repo":"tnvolman/typewright-website-audit"}"#));
-        let agents = [Agent::new("x", sk.verifying_key())];
-        assert!(decode_request(&encode_request(&r, &sk), &agents).is_ok());
+    fn high_impact_comes_from_the_parsed_action() {
+        assert!(is_elevated(&ActionView::Known { verb: "Merge", object: String::new(), target: String::new(), detail: String::new() }));
+        assert!(!is_elevated(&ActionView::Known { verb: "Run", object: String::new(), target: String::new(), detail: String::new() }));
+        assert!(is_elevated(&ActionView::Unknown { tool: "ci.run".into() }), "unknown tools are always high impact");
     }
 
     #[test]
     fn reply_sizes() {
-        let (req, _) = demo_req(None, None, None);
+        let (req, _) = demo_req();
         let app = SigningKey::from_bytes(&[7u8; 32]);
         let ok = encode_reply(&req, true, None, &app, AT);
         let no = encode_reply(&req, false, Some("unrecognized"), &app, AT);
@@ -793,12 +885,12 @@ mod tests {
         assert!(verify_paired_reply(&reply, &agent_sk(2).verifying_key()).is_none());
 
         // After pinning, a reply signed by any other app key must fail.
-        let (req, _) = demo_req(None, None, None);
+        let (req, _) = demo_req();
         let impostor = agent_sk(9);
         let fake = encode_reply(&req, true, None, &impostor, AT);
-        assert!(!verify_reply(&fake, &pinned, &req.id, &req.kid, &req.hash));
+        assert!(!verify_reply(&fake, &pinned, &req.id, &req.kid, &req.hash()));
         let real = encode_reply(&req, true, None, &app, AT);
-        assert!(verify_reply(&real, &pinned, &req.id, &req.kid, &req.hash));
+        assert!(verify_reply(&real, &pinned, &req.id, &req.kid, &req.hash()));
     }
 
     #[test]

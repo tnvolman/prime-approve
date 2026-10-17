@@ -18,18 +18,18 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 __all__ = [
-    "REQ_PREFIX", "PAIR_PREFIX", "PAIRED_PREFIX", "REPLY_PREFIX", "VERBS", "HIGH_IMPACT_VERBS", "DENY_REASONS",
-    "MAX_QR", "MAX_LIFETIME_SECS", "ProtocolError", "Reply", "RequestRecord",
+    "REQ_PREFIX", "PAIR_PREFIX", "PAIRED_PREFIX", "REPLY_PREFIX", "HIGH_IMPACT_VERBS", "DENY_REASONS",
+    "MAX_QR", "MAX_ACTION", "MAX_LIFETIME_SECS", "ActionView", "action_view", "summary_line", "ProtocolError", "Reply", "RequestRecord",
     "public_bytes", "signing_key", "kid", "action_hash", "action_code", "glyphs", "fingerprint", "pairing_code",
     "b64e", "b64d", "base45_encode", "base45_decode", "build_request", "encode_pair_offer", "verify_paired_reply",
     "parse_reply", "verify_reply", "is_elevated",
 ]
 
-REQ_PREFIX = "primeapprove:v1:"
+REQ_PREFIX = "primeapprove:v2:"
 PAIR_PREFIX = "primeapprove:pair:v1:"
 PAIRED_PREFIX = "primeapprove:paired:v1:"
 REPLY_PREFIX = "PA1:"
-REQ_DOMAIN = b"primeapprove-req-v1\n"
+REQ_DOMAIN = b"primeapprove-req-v2\n"
 PAIR_DOMAIN = b"primeapprove-pair-v1\n"
 PAIRED_DOMAIN = b"primeapprove-paired-v1\n"
 PAIR_CODE_DOMAIN = b"prime-approve pair v1"
@@ -39,10 +39,8 @@ REPLY_LEN = 78
 MAX_QR = 800
 MAX_TITLE = 60
 MAX_DETAILS = 280
-MAX_OBJECT = 24
-MAX_TARGET = 40
+MAX_ACTION = 400
 MAX_LIFETIME_SECS = 600
-VERBS = ["Merge", "Deploy", "Publish", "Delete", "Send", "Pay", "Sign", "Run", "Grant", "Change"]
 HIGH_IMPACT_VERBS = ["Merge", "Deploy", "Publish", "Delete", "Send", "Pay", "Sign", "Grant"]
 DENY_REASONS = ["wrong_action", "not_now", "unrecognized"]
 B45 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:"
@@ -169,20 +167,108 @@ def _split_signed(qr: str, prefix: str) -> tuple[bytes, bytes]:
     return body, sig
 
 
-# ------------------------------------------------------------------ requests
+# ------------------------------------------------------------------ what the Prime shows
 
 def _printable(s: str, newline: bool) -> bool:
     return all(" " <= c <= "~" or (newline and c == "\n") for c in s)
 
 
-def _summary_ok(s: str, limit: int) -> bool:
-    return (0 < len(s) <= limit and s.strip() == s
-            and all(c.isascii() and (c.isalnum() or c in " #._/:@-") for c in s))
+@dataclass
+class ActionView:
+    """What the Prime shows for an action (mirrors ActionView in proto.rs). `verb` is None for an
+    unknown tool, which the Prime shows raw and always marks high impact."""
+    tool: str
+    verb: str | None = None
+    object: str | None = None
+    target: str | None = None
+    detail: str | None = None
 
 
-def is_elevated(risk: str, verb: str | None) -> bool:
-    return risk == "elevated" or verb in HIGH_IMPACT_VERBS
+class _Dup(ValueError):
+    pass
 
+
+def _no_dups(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise _Dup("repeated key")
+    return dict(pairs)
+
+
+def _no_constant(name):
+    raise ValueError(f"{name} is not JSON")
+
+
+def _no_surrogates(v):
+    if isinstance(v, str):
+        if any("\ud800" <= c <= "\udfff" for c in v):
+            raise ValueError("lone surrogate")
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            _no_surrogates(k); _no_surrogates(x)
+    elif isinstance(v, list):
+        for x in v:
+            _no_surrogates(x)
+
+
+def _valid_repo(r) -> bool:
+    if not isinstance(r, str) or len(r) > 64 or r.count("/") != 1:
+        return False
+    return all(p and p not in (".", "..") and len(p) <= 100 and all(c.isascii() and (c.isalnum() or c in "-_.") for c in p)
+               for p in r.split("/"))
+
+
+def action_view(action) -> ActionView:
+    """Parses action bytes (or str) exactly as the Prime does (action_view in proto.rs). Raises ProtocolError
+    for anything the Prime would refuse."""
+    if isinstance(action, (bytes, bytearray)):
+        try:
+            action = bytes(action).decode("ascii")
+        except UnicodeDecodeError:
+            raise ProtocolError("action must be printable ASCII") from None
+    if not action or len(action.encode()) > MAX_ACTION or not _printable(action, True):
+        raise ProtocolError(f"action must be printable ASCII JSON of {MAX_ACTION} bytes or less")
+    try:
+        # serde_json refuses NaN/Infinity and lone surrogates; refuse them here too.
+        v = json.loads(action, parse_constant=_no_constant)
+        _no_surrogates(v)
+    except ValueError:
+        raise ProtocolError("action is not valid JSON") from None
+    if not isinstance(v, dict) or not isinstance(v.get("tool"), str):
+        raise ProtocolError('action needs a string "tool"')
+    tool = v["tool"]
+    if tool == "github.merge_pull_request":
+        try:
+            m = json.loads(action, object_pairs_hook=_no_dups)
+        except _Dup:
+            raise ProtocolError("merge action has missing, extra or repeated fields") from None
+        if set(m) != {"tool", "repo", "pr", "method", "head"}:
+            raise ProtocolError("merge action has missing, extra or repeated fields")
+        pr, head = m["pr"], m["head"]
+        # serde's u64 takes only plain non-negative integers (no 2.0, no "2", no true).
+        if type(pr) is not int or pr < 0 or pr >= 2**64 or not isinstance(m["method"], str) or not isinstance(head, str):
+            raise ProtocolError("merge action has missing, extra or repeated fields")
+        if not _valid_repo(m["repo"]):
+            raise ProtocolError("merge action repo must be owner/name")
+        if m["method"] not in ("merge", "squash", "rebase"):
+            raise ProtocolError("merge method must be merge, squash or rebase")
+        if len(head) != 40 or not all(c in "0123456789abcdef" for c in head):
+            raise ProtocolError("merge head must be a 40-char lowercase commit SHA")
+        if pr == 0:
+            raise ProtocolError("merge pr must be a positive number")
+        return ActionView(tool, "Merge", f"PR #{pr}", m["repo"], f"{m['method']} merge at {head[:7]}")
+    return ActionView(tool)
+
+
+def summary_line(view: ActionView) -> str | None:
+    return f"{view.verb} → {view.object} → {view.target}" if view.verb else None
+
+
+def is_elevated(view: ActionView) -> bool:
+    return view.verb is None or view.verb in HIGH_IMPACT_VERBS
+
+
+# ------------------------------------------------------------------ requests
 
 @dataclass
 class RequestRecord:
@@ -194,56 +280,41 @@ class RequestRecord:
     title: str
     action: str
     qr: str
+    view: ActionView | None = None
 
     @property
     def code(self) -> str:
         return action_code(self.hash)
 
 
-def build_request(sk: Ed25519PrivateKey, action: bytes, title: str, details: str = "", *, agent: str = "agent",
-                  verb: str | None = None, object: str | None = None, target: str | None = None,
-                  risk: str | None = None, ttl: int = MAX_LIFETIME_SECS, now: int, req_id: bytes | None = None
-                  ) -> RequestRecord:
-    """Builds and signs a request the Prime accepts. Checks everything the Prime checks, so a request
-    that would be rejected fails here instead. `risk` defaults to elevated for high-impact verbs."""
+def build_request(sk: Ed25519PrivateKey, action: bytes, title: str = "", details: str = "", *, agent: str = "agent",
+                  ttl: int = MAX_LIFETIME_SECS, now: int, req_id: bytes | None = None) -> RequestRecord:
+    """Builds and signs a v2 request carrying the exact action bytes. Checks everything the Prime checks,
+    so a request that would be rejected fails here instead. The Prime parses and hashes the action
+    itself; `title` and `details` are only shown as "Agent says"."""
     try:
-        json.loads(action)
-    except ValueError:
-        raise ProtocolError("--action must be JSON") from None
+        action_s = action.decode("ascii")
+    except UnicodeDecodeError:
+        raise ProtocolError("action must be printable ASCII") from None
+    view = action_view(action_s)
     if not 0 < ttl <= MAX_LIFETIME_SECS:
         raise ProtocolError(f"expiry must be 1 to {MAX_LIFETIME_SECS} seconds out")
     if len(title) > MAX_TITLE or len(details) > MAX_DETAILS:
         raise ProtocolError(f"title is limited to {MAX_TITLE} chars and details to {MAX_DETAILS}")
-    if not title or not _printable(title, False) or not _printable(details, True) or not _printable(agent, False):
+    if not _printable(title, False) or not _printable(details, True) or not _printable(agent, False):
         raise ProtocolError("title, details and agent name must be printable ASCII (newlines allowed in details)")
-    parts = (verb, object, target)
-    if any(p is not None for p in parts):
-        if None in parts:
-            raise ProtocolError("verb, object and target go together")
-        if verb not in VERBS:
-            raise ProtocolError(f"verb must be one of {', '.join(VERBS)}")
-        if not _summary_ok(object, MAX_OBJECT) or not _summary_ok(target, MAX_TARGET):
-            raise ProtocolError("object (24) and target (40): letters, digits, space and # . _ / : @ - only")
-    risk = risk or ("elevated" if verb in HIGH_IMPACT_VERBS else "routine")
-    if risk not in ("routine", "elevated"):
-        raise ProtocolError("risk must be routine or elevated")
-    if verb in HIGH_IMPACT_VERBS and risk != "elevated":
-        raise ProtocolError(f"{verb} is always high impact; it can't be sent as routine")
     req_id = req_id if req_id is not None else os.urandom(16)
     if len(req_id) != 16:
         raise ProtocolError("request id is 16 bytes")
     pk = public_bytes(sk)
-    h = action_hash(action)
     # Same field order as the Rust struct; serde_json produces the identical compact JSON.
     body = {"id": req_id.hex(), "kid": kid(pk), "agent": agent, "title": title, "details": details,
-            "risk": risk, "hash": h, "exp": now + ttl}
-    if verb is not None:
-        body.update(verb=verb, object=object, target=target)
+            "action": action_s, "exp": now + ttl}
     raw = json.dumps(body, separators=(",", ":"), ensure_ascii=True).encode()
     qr = f"{REQ_PREFIX}{b64e(raw)}.{b64e(sk.sign(REQ_DOMAIN + raw))}"
     if len(qr) > MAX_QR:
-        raise ProtocolError(f"request is {len(qr)} bytes; the Prime's cap is {MAX_QR}. Shorten the title or details")
-    return RequestRecord(req_id.hex(), kid(pk), h, now + ttl, title, action.decode(), qr)
+        raise ProtocolError(f"request is {len(qr)} bytes; the Prime's cap is {MAX_QR}. Shorten the action, title or details")
+    return RequestRecord(req_id.hex(), kid(pk), action_hash(action), now + ttl, title, action_s, qr, view)
 
 
 # ------------------------------------------------------------------ pairing

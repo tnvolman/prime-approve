@@ -99,15 +99,17 @@ def test_verify_rust_reply_single_use(home, capsys, monkeypatch):
 def test_request_then_verify_photo(home, capsys, monkeypatch, tmp_path):
     use_test_agent(home); pin(home)
     code, out = run(capsys, monkeypatch, "request", "--action", PY["action"], "--title", "Merge PR #2 into main",
-                    "--verb", "Merge", "--object", "PR #2", "--target", "typewright-website-audit", "--text")
+                    "--text")
     assert code == 0 and "ACTION CODE  1594 E5CC" in out
+    assert "The Prime will show:  Merge → PR #2 → tnvolman/typewright-website-audit  (squash merge at 33393c6)" in out
     pending = list((home / "pending").glob("*.json"))
     assert len(pending) == 1
     rec = json.loads(pending[0].read_text())
     assert rec["exp"] - int(__import__("time").time()) <= 600
     body = json.loads(__import__("primeapprove.protocol", fromlist=["b64d"]).b64d(
-        [l for l in out.splitlines() if l.startswith("primeapprove:v1:")][0][16:].split(".")[0]))
-    assert body["risk"] == "elevated", "Merge is high impact"
+        [l for l in out.splitlines() if l.startswith("primeapprove:v2:")][0][16:].split(".")[0]))
+    assert list(body) == ["id", "kid", "agent", "title", "details", "action", "exp"]
+    assert body["action"] == PY["action"], "the Prime gets the action bytes, not a hash"
 
     class R: pass
     r = R(); r.id, r.hash = rec["id"], rec["hash"]
@@ -123,7 +125,7 @@ def test_request_then_verify_photo(home, capsys, monkeypatch, tmp_path):
 
 def test_verify_rejects_wrong_key_and_unknown_request(home, capsys, monkeypatch):
     use_test_agent(home); pin(home)
-    run(capsys, monkeypatch, "request", "--action", '{"x":1}', "--title", "Run it", "--ttl", "60")
+    run(capsys, monkeypatch, "request", "--action", '{"tool":"ci.run"}', "--title", "Run it", "--ttl", "60")
     rec = json.loads(next((home / "pending").glob("*.json")).read_text())
 
     class R: pass
@@ -142,15 +144,16 @@ def test_verify_rejects_wrong_key_and_unknown_request(home, capsys, monkeypatch)
 
 def test_request_refuses_what_the_prime_would_reject(home, capsys, monkeypatch):
     use_test_agent(home)
+    ok = '{"tool":"ci.run"}'
     bad = [
         ["--action", "not json", "--title", "t"],
-        ["--action", "{}", "--title", "t", "--ttl", "601"],
-        ["--action", "{}", "--title", "x" * 61],
-        ["--action", "{}", "--title", "Merge PR\u202e2"],
-        ["--action", "{}", "--title", "t", "--verb", "Merge", "--object", "PR → 2", "--target", "x"],
-        ["--action", "{}", "--title", "t", "--verb", "Merge", "--object", "PR"],
-        ["--action", "{}", "--title", "t", "--verb", "Delete", "--object", "repo", "--target", "x", "--risk", "routine"],
-        ["--action", "{}", "--title", "t", "--details", "y" * 281],
+        ["--action", "{}", "--title", "t"],
+        ["--action", '{"tool":"github.merge_pull_request","repo":"a/b","pr":2}'],
+        ["--action", "{\"tool\":\"x\",\"t\":\"caf\u00e9\"}"],
+        ["--action", ok, "--ttl", "601"],
+        ["--action", ok, "--title", "x" * 61],
+        ["--action", ok, "--title", "Merge PR\u202e2"],
+        ["--action", ok, "--details", "y" * 281],
     ]
     for args in bad:
         assert run(capsys, monkeypatch, "request", *args)[0] == 2, args
@@ -177,3 +180,9 @@ def test_pair_accept_same_prime_again_is_a_plain_yes(home, capsys, monkeypatch):
     store.pin_prime(bytes.fromhex(RUST["app_pk"]), "same")
     code, out = run(capsys, monkeypatch, "pair-accept", RUST["paired_reply"], stdin="y\n")
     assert code == 0 and "replaces" not in out and "[y/N]" in out
+
+
+def test_request_unknown_tool_warns(home, capsys, monkeypatch):
+    use_test_agent(home)
+    code, out = run(capsys, monkeypatch, "request", "--action", '{"tool":"github.delete_repo","repo":"a/b"}')
+    assert code == 0 and "doesn't know tool 'github.delete_repo'" in out and "high impact" in out
