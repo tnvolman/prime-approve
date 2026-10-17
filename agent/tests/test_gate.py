@@ -211,7 +211,7 @@ def test_cli_gate_never_prints_the_token(gh, ghome, tmp_path, capsys, monkeypatc
     rec = req()
     monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
     rf = tmp_path / "request.txt"; rf.write_text(rec.qr + "\n")
-    code = cli.main(["gate", str(rf), reply_for(rec, 1), "--api", gh.url, "--gate-home", str(ghome)])
+    code = cli.main(["gate", str(rf), reply_for(rec, 1), "--api", gh.url, "--gate-home", str(ghome), "--token-from-env"])
     out = capsys.readouterr()
     assert code == 0 and "POSTED prime-approve=success" in out.out
     assert TOKEN not in out.out + out.err
@@ -234,3 +234,17 @@ def test_gate_state_is_separate_from_the_agent(tmp_path, monkeypatch):
     assert gate.gate_home() == tmp_path / ".primeapprove-gate"
     with pytest.raises(Exception, match="gate-trust"):
         gate.load_trust(tmp_path / "nowhere")
+
+
+def test_gate_prefers_its_own_token_file_over_the_environment(tmp_path, monkeypatch):
+    home = tmp_path / "gatehome"; home.mkdir()
+    (home / "token").write_text("gate-own-token\n")
+    monkeypatch.setenv("GITHUB_TOKEN", "agent-token")
+    assert gate.load_token(None, home) == "gate-own-token"
+    assert gate.load_token(None, home, from_env=True) == "agent-token"
+    (home / "token").unlink()
+    with pytest.raises(gate.ProtocolError, match="ignored unless"):
+        gate.load_token(None, home)
+    monkeypatch.delenv("GITHUB_TOKEN")
+    with pytest.raises(gate.ProtocolError, match="not set"):
+        gate.load_token(None, home, from_env=True)

@@ -197,7 +197,8 @@ The hash is still plain SHA-256 of the action bytes, so the demo action keeps ha
 > **Until branch protection requires the `prime-approve` check, a green check is only advice:** anyone with write access can still merge. This repo does not require it yet; turning that on is a repo settings change for the owner.
 
     pa gate-trust --prime-key <Prime app key hex> --agent-key <agent public key hex>   # once
-    export GITHUB_TOKEN=...            # or --token-file, or <gate home>/token; never printed
+    # the gate reads its own token from <gate home>/token (or --token-file); never printed.
+    # $GITHUB_TOKEN is ignored unless you pass --token-from-env, so it never picks up the agent's token.
     pa gate request.txt reply.jpg                  # --mode status (default)
     pa gate request.txt reply.jpg --mode merge     # merge the approved SHA instead
 
@@ -220,6 +221,7 @@ Exit codes: 0 done, 1 denied, 2 refused. HTTP is standard-library `urllib`; `--a
 
 **Residual risks.**
 - **Admins can bypass** branch protection unless bypassing is disabled, and anyone who can change the settings can remove the requirement.
+- **Until the required check comes only from the gate's identity, any token with commit-status write access, including the agent's, can post a fake `prime-approve` success.** Give the agent a fine-grained token without *Commit statuses* or merge rights, or have the gate post as its own GitHub App.
 - **Anyone else who can post statuses** can post a `prime-approve` status too: a commit status is not tied to an app identity. Keep write access (and tokens with `repo:status`) away from the agent. A GitHub App check run, or a ruleset that requires the check from a specific app, would pin who posted it (not done yet).
 - **The token's scope is the gate's blast radius.** A classic `repo` token can do much more than post statuses; prefer a fine-grained token limited to this repository with *Commit statuses: write* (plus *Pull requests: read*, and *Contents: write* only for merge mode).
 - The approval covers the head commit, not the base: merging into a base that moved is GitHub's normal behavior.

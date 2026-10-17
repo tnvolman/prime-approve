@@ -66,13 +66,18 @@ def load_trust(home: Path) -> tuple[bytes, list[bytes]]:
     return bytes.fromhex(d["prime_pk"]), [bytes.fromhex(k) for k in d["agents"]]
 
 
-def load_token(token_file: str | None, home: Path) -> str:
-    """GITHUB_TOKEN, else --token-file, else <gate home>/token. Never printed."""
-    tok = os.environ.get("GITHUB_TOKEN", "").strip()
-    if not tok:
+def load_token(token_file: str | None, home: Path, from_env: bool = False) -> str:
+    """The gate's own token: --token-file, else <gate home>/token. $GITHUB_TOKEN only
+    when asked (from_env), so a shared machine never hands the gate the agent's token. Never printed."""
+    if from_env:
+        tok = os.environ.get("GITHUB_TOKEN", "").strip()
+        if not tok:
+            raise ProtocolError("--token-from-env given but GITHUB_TOKEN is not set")
+    else:
         path = Path(token_file) if token_file else home / "token"
         if not path.exists():
-            raise ProtocolError("no GitHub token: set GITHUB_TOKEN or use --token-file")
+            raise ProtocolError(f"no GitHub token: put the gate's own token in {path} or use --token-file "
+                                "(GITHUB_TOKEN is ignored unless you pass --token-from-env)")
         tok = path.read_text().strip()
     if not tok or any(c.isspace() for c in tok):
         raise ProtocolError("GitHub token is empty or malformed")
