@@ -1,6 +1,6 @@
 # Prime Approve threat model
 
-Status: draft for v0.2. Simulator-tested only, not yet run on Passport Prime hardware.
+Status: draft for v0.4. Simulator-tested only, not yet run on Passport Prime hardware.
 
 ## What Prime Approve is for
 

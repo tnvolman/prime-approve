@@ -4,3 +4,6 @@ manifest.toml
 shots/
 target/
 ui/ui
+agent/*.egg-info/
+__pycache__/
+.pytest_cache/
