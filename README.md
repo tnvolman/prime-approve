@@ -8,13 +8,25 @@ Status: v0.2 in progress, simulator-tested only. Not yet run on hardware (see *K
 
 ## Screenshots (KeyOS simulator, color-corrected)
 
-**v0.2 (October 17, 2026):** a default build (no demo agent, no demo key), a demo build with its warning banner, the demo request (high impact set by the Merge verb), and the system QR scanner opened by **Scan request**. The recent-decisions rows are left over from earlier simulator runs.
+**Pairing (v0.3, October 17, 2026):** a default build with no agent, the pair-confirm screen (pairing code and agent key), naming the agent on the Prime with the on-screen keyboard, the signed answer QR for the agent, a relaunch showing the saved pairing, the unpair prompt, and a relaunch after unpairing (Agent 1 stays gone, Build bot stays paired). The demo agent "Cos" is a demo-build-only, in-memory agent.
 
 <p>
-<img src="shots/v0.2/home-default.png" width="200" alt="Default build home: no agent paired">
-<img src="shots/v0.2/demo-home.png" width="200" alt="Demo build home with the Demo key, not secure banner">
-<img src="shots/v0.2/demo-review.png" width="200" alt="Demo request review: Merge PR #2, action code 1594 E5CC">
-<img src="shots/v0.2/scanner.png" width="200" alt="System QR scanner opened from Scan request">
+<img src="docs/screenshots/v0.3/home-no-agent.png" width="140" alt="Default build: no agent paired">
+<img src="docs/screenshots/v0.3/pair-confirm.png" width="140" alt="Pair this agent? with a 12-byte pairing code">
+<img src="docs/screenshots/v0.3/pair-name.png" width="140" alt="Naming the agent with the on-screen keyboard">
+<img src="docs/screenshots/v0.3/paired-reply.png" width="140" alt="Paired with Build bot: answer QR and pairing code">
+<img src="docs/screenshots/v0.3/relaunch-saved.png" width="140" alt="After relaunch: Agent 1 still paired">
+<img src="docs/screenshots/v0.3/unpair.png" width="140" alt="Unpair this agent?">
+<img src="docs/screenshots/v0.3/relaunch-after-unpair.png" width="140" alt="After relaunch: Agent 1 stays unpaired">
+</p>
+
+**v0.2 (October 17, 2026):** a default build (no demo agent, no demo key), a demo build with its warning banner, the demo request (high impact set by the Merge verb), and the system QR scanner opened by **Scan request** (now **Scan code**). The recent-decisions rows are left over from earlier simulator runs.
+
+<p>
+<img src="docs/screenshots/v0.2/home-default.png" width="200" alt="Default build home: no agent paired">
+<img src="docs/screenshots/v0.2/demo-home.png" width="200" alt="Demo build home with the Demo key, not secure banner">
+<img src="docs/screenshots/v0.2/demo-review.png" width="200" alt="Demo request review: Merge PR #2, action code 1594 E5CC">
+<img src="docs/screenshots/v0.2/scanner.png" width="200" alt="System QR scanner opened from Scan request">
 </p>
 
 Earlier v0.1 screenshots:
@@ -70,6 +82,23 @@ JSON: `{id, kid, decision: "approve"|"deny", hash, app: app public key hex, reas
 **QR codes** are drawn with **low error correction**. That gives fewer, larger modules, which a camera reads more easily off a screen. Error correction is there to recover damaged codes, and the signature already catches a bad read.
 
 App key: Ed25519 from HKDF-SHA256 (salt `prime-approve`, ikm = the KeyOS app seed via `GetAppSeed`, info `app key v1`). The app never touches the master seed.
+
+## Pairing
+
+Pairing is two-way: the Prime learns the agent's key, and the agent learns (and pins) the Prime's key.
+
+1. **The agent shows a pairing offer QR:** `primeapprove:pair:v1:<b64url(json)>.<b64url(sig)>`. JSON is `{pk, exp}`: the agent's Ed25519 public key (64 hex chars) and an expiry no more than 10 minutes out. The signature is by that same key over `"primeapprove-pair-v1\n" + json`, which proves the agent holds the key. The offer has **no name**: the agent never names itself.
+2. **The Prime shows "Pair this agent?"** with the pairing code and the key fingerprint, inside a trusted frame. The person types a name for the agent on the Prime (printable ASCII, 1 to 24 characters; left blank, it becomes "Agent N"). That name is what the review band shows from then on.
+3. **On Pair, the Prime saves the agent and shows its answer QR:** `primeapprove:paired:v1:<b64url(json)>.<b64url(sig)>`. JSON is `{kid, app_pk}`: the paired agent's key id and the Prime's app public key. It is signed by the app key over `"primeapprove-paired-v1\n" + json`.
+4. **The agent checks the answer** (`verify_paired_reply`), which returns the Prime's app key, and **pins it**. From then on the agent must verify every reply against that pinned key and reject a reply signed by any other key, even a validly signed one (threat model rule 1).
+
+**Pairing code.** Both screens show the first 12 bytes of `SHA-256("prime-approve pair v1" || agent_pk || app_pk)` as six groups of four uppercase hex characters, for example `3F57 5D3C E654 3053 C615 D2E5`. The agent computes it from its own key and the pinned app key. If anyone swapped either key on the way, the codes differ. The person should pair only when the codes match. The signatures prove each side holds its key; the code comparison is what proves it is the *right* key.
+
+**Saved, and removable.** Pairings are saved in the app's storage and survive a restart. Up to 5 agents can be paired; re-pairing a key that's already paired just renames it. Tap an agent on the home screen to unpair it (or choose "Don't recognize this" when denying one of its requests). Unpairing is saved, so the agent stays unpaired after a restart, and the agent's requests are refused as "Bad signature" from then on.
+
+**Scanning.** **Scan code** takes either a request or a pairing offer, and the Launcher hands both to the app (`primeapprove:v1:` and `primeapprove:pair:v1:` match rules). Demo builds add a **Demo pair** button that generates a pairing offer from a fresh random key and feeds it through the same handler, because the simulator has no camera. A fresh random key means a demo pairing never leaves a publicly known key paired.
+
+Sizes: the pairing offer is 228 bytes and the answer 246 bytes, both well under the 800-byte cap.
 
 ## Structured summary line
 
@@ -176,7 +205,7 @@ These are untested until a dev unit arrives:
 
 ## Scanning
 
-**Scan request** opens the system QR scanner (this needs the `ShowModal` permission). A request scanned from the Launcher's own scanner is handed to the app through the `primeapprove:v1:` QR match rule and picked up at launch. Either way, the text goes through the same checks: size, signature, paired agent, plain-ASCII text, expiry no more than 10 minutes out, and single use. The simulator has no camera, so neither path can be exercised there.
+**Scan code** opens the system QR scanner (this needs the `ShowModal` permission). A request scanned from the Launcher's own scanner is handed to the app through the `primeapprove:v1:` QR match rule and picked up at launch. Either way, the text goes through the same checks: size, signature, paired agent, plain-ASCII text, expiry no more than 10 minutes out, and single use. The simulator has no camera, so neither path can be exercised there.
 
 ## Build and run (simulator)
 
@@ -185,7 +214,7 @@ Requires the Foundation SDK 1.1.0. From this folder:
     foundation develop
     foundation sim
 
-A default build has no paired agent and no demo key. Pairing is the next planned step.
+A default build has no paired agent and no demo key. Pair an agent by scanning its pairing code (see *Pairing*).
 
 **Demo build.** Building with the `demo` cargo feature pairs a demo agent whose private key is public (anyone can sign as it), adds a **Demo request** button and, in debug builds, the Tampered, Replay and Hidden text tests. Every screen then shows a red **Demo key · not secure** banner. Never put a demo build on a device you use for real. The demo request is a real, already-merged PR (`tnvolman/typewright-website-audit` #2), pinned to its head commit.
 
@@ -197,7 +226,7 @@ Change `app-id` in `app-config.toml`. The app's signing key is derived from the 
 
 ## Tests, docs and tools
 
-- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, reply signing and verification, and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set by the verb). One test, `known_gap_summary_not_bound_to_hash`, deliberately pins the open gap that the summary isn't tied to the hash yet; it gets flipped when the Prime reads the action itself. Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed).
+- `src/proto.rs` has unit tests for the protocol: the glyph test vector, summary checks, QR size, reply signing and verification, and one test per finding from the October 2026 review (plain-ASCII text, the expiry limit, high impact set by the verb). Pairing tests cover the offer and answer roundtrip, a forged offer signature, a far-future expiry, name checks, the pairing code (same both ways, changes if either key changes) and agent-side pinning (a reply from any other app key fails). One test, `known_gap_summary_not_bound_to_hash`, deliberately pins the open gap that the summary isn't tied to the hash yet; it gets flipped when the Prime reads the action itself. Run them on any computer with `cd host-tests && cargo test` (no KeyOS SDK needed).
 - `docs/colorblind.md`: the palette check behind the colorblind note.
 - `tools/colorblind.py`: re-runs that check (needs numpy). `--old` shows the previous palette.
 - `tools/*.sh`: simulator driving and screenshot scripts.
