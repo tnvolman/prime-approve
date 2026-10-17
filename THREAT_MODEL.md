@@ -46,6 +46,8 @@ When the Prime shows a request inside the bordered panel and the person slides t
 | Approver doesn't compare codes carefully | Partly mitigated | Action code plus shape row; clear-signing reduces reliance on comparison |
 | Unattended unlocked Prime | Open | Short expiry; ask Foundation about a KeyOS-drawn confirmation for high-impact approvals |
 | Lost Prime | Open | Key epoch in HKDF info ("app key v1" to v2) and unpairing at the agent or gate |
+| Key swapped during pairing | Mitigated | Pairing code derived from both keys, compared on both screens before anything is saved; the agent pins the Prime's key |
+| Unpaired agent keeps access | Fixed | Unpairing is saved and survives a restart; requests from that agent are refused |
 | Fork reuses our app-id | Documented | The app key derives from app-id plus master seed; forks must change the app-id |
 
 ## Rules for anyone integrating
