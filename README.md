@@ -194,6 +194,8 @@ The hash is still plain SHA-256 of the action bytes, so the demo action keeps ha
 
 `pa verify` tells an agent whether it was approved; it can't stop a compromised agent from going ahead anyway. The gate makes the approval **enforceable**: it holds the GitHub token, verifies the Prime's reply, and only then marks the **exact PR head commit** with the commit status `prime-approve` (state `success`), or merges that exact commit. With branch protection requiring that status, GitHub won't merge without it.
 
+> **Until branch protection requires the `prime-approve` check, a green check is only advice:** anyone with write access can still merge. This repo does not require it yet; turning that on is a repo settings change for the owner.
+
     pa gate-trust --prime-key <Prime app key hex> --agent-key <agent public key hex>   # once
     export GITHUB_TOKEN=...            # or --token-file, or <gate home>/token; never printed
     pa gate request.txt reply.jpg                  # --mode status (default)
