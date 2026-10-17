@@ -126,6 +126,8 @@ The Review screen has two app-only areas:
 
 Nothing the agent writes freely (title, details) is ever drawn inside either one. That text only appears in the scrolling area between them.
 
+What the frame means: the request is **verified from the paired agent, unchanged**, meaning it was signed by that agent's key and not altered on the way. It does not mean the action is safe or that the Prime has confirmed the summary is true. The summary is supplied by the agent.
+
 ## Scroll gate
 
 The slider stays locked until the request has been scrolled to the end. This is implemented, but the demo doesn't exercise it: the demo request has only two short lines of details, so it fits on one screen and the gate opens straight away. The 800-byte QR limit keeps every request short, so in practice the gate rarely triggers. It has not been tested with a request long enough to need scrolling.
