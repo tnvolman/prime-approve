@@ -6,18 +6,18 @@ from primeapprove.protocol import (action_code, action_hash, base45_decode, base
 import hashlib
 import pytest
 
-DEMO_ACTION = b'{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}'
-DEMO_HASH = "1594e5cc61b278e99dba75aad80d8b2dd41e135820630c1e12584dda3b95d9d8"
+DEMO_ACTION = b'{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"base":"main","method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}'
+DEMO_HASH = "f961b2d1333fb6d7cabfca5deae7b688bc23179427874fba41550e7c6a4a101d"
 # compact_reply_test_vector in proto.rs: app key = seed [7; 32], demo agent, demo request, AT.
-REPLY_VECTOR = "PA1:W50H00PE4XS8-.CFPDUOQ65F+%N1KSUHI911B:D891NZDPID5VRFZKBHEDAB%W1J9QPKTOSI$6F+8KX.AO5MEC3IQG$A9QIB%UN/R70-F*XC7+DC PAW7"
+REPLY_VECTOR = "PA1:W50H00PE4XS8-.CFPDUOQEHIDYT2BN5 FYCK3H043P$PR9VC.CVR851BUOKMF P-$F0J0FFB1WVDOMVACB.EN29N2FM 1KTTH0DBBIF7T8DK*MIQV9O4V"
 DEMO_AGENT_SEED = hashlib.sha256(b"prime-approve DEMO agent key - public, never use for real").digest()
 
 
 def test_demo_vector():
     h = action_hash(DEMO_ACTION)
     assert h == DEMO_HASH
-    assert action_code(h) == "1594 E5CC"
-    assert glyphs(h) == [(1, 0), (2, 2), (0, 3), (1, 1), (5, 3), (2, 3), (5, 2), (2, 1)]
+    assert action_code(h) == "F961 B2D1"
+    assert glyphs(h) == [(3, 2), (7, 3), (6, 2), (7, 2), (2, 1), (7, 3), (2, 1), (5, 3)]
     assert glyphs(h.upper()) == glyphs(h)
 
 

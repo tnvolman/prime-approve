@@ -39,9 +39,9 @@ mod interop {
         assert_eq!(req.action, s(&v, "action"), "the exact action bytes travel in the request");
         assert_eq!(req.hash(), hex::encode(Sha256::digest(s(&v, "action").as_bytes())), "same action hashing");
         assert_eq!(req.hash(), s(&v, "request_hash"));
-        assert_eq!(action_code(&req.hash()), "1594 E5CC");
+        assert_eq!(action_code(&req.hash()), "F961 B2D1");
         assert_eq!(summary_line(&view).as_deref(), Some(s(&v, "request_summary")));
-        assert_eq!(summary_line(&view).as_deref(), Some("Merge → PR #2 → tnvolman/typewright-website-audit"));
+        assert_eq!(summary_line(&view).as_deref(), Some("Merge PR #2 into main → tnvolman/typewright-website-audit"));
         assert!(is_elevated(&view));
         // Python's compact JSON is byte-identical to what serde_json writes for the same request.
         let body = s(&v, "request").strip_prefix(REQ_PREFIX).unwrap().split_once('.').unwrap().0.to_string();

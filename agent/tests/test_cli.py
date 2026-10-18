@@ -91,7 +91,7 @@ def test_verify_rust_reply_single_use(home, capsys, monkeypatch):
     store.save_pending(RequestRecord(PY["request_id"], kid(public_bytes(signing_key(TEST_AGENT_SEED))), PY["request_hash"],
                                      int(time.time()) + 600, "Merge PR #2 into main", PY["action"], PY["request"]))
     code, out = run(capsys, monkeypatch, "verify", RUST["reply_approve"])
-    assert code == 0 and out.startswith("APPROVED  1594 E5CC") and PY["action"] in out
+    assert code == 0 and out.startswith("APPROVED  F961 B2D1") and PY["action"] in out
     code, out = run(capsys, monkeypatch, "verify", RUST["reply_approve"])
     assert code == 2 and "already answered" in out
 
@@ -100,8 +100,8 @@ def test_request_then_verify_photo(home, capsys, monkeypatch, tmp_path):
     use_test_agent(home); pin(home)
     code, out = run(capsys, monkeypatch, "request", "--action", PY["action"], "--title", "Merge PR #2 into main",
                     "--text")
-    assert code == 0 and "ACTION CODE  1594 E5CC" in out
-    assert "The Prime will show:  Merge → PR #2 → tnvolman/typewright-website-audit  (squash · head 33393c6)" in out
+    assert code == 0 and "ACTION CODE  F961 B2D1" in out
+    assert "The Prime will show:  Merge PR #2 into main → tnvolman/typewright-website-audit  (squash · head 33393c6)" in out
     pending = list((home / "pending").glob("*.json"))
     assert len(pending) == 1
     rec = json.loads(pending[0].read_text())

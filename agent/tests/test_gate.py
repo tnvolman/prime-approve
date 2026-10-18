@@ -21,8 +21,8 @@ NOW = 1_800_000_000
 TOKEN = "ghp_TESTTOKEN_never_printed_123"
 
 
-def merge_action(repo=REPO, pr=PR, head=HEAD, method="squash"):
-    return json.dumps({"tool": "github.merge_pull_request", "repo": repo, "pr": pr, "method": method, "head": head},
+def merge_action(repo=REPO, pr=PR, head=HEAD, method="squash", base="main"):
+    return json.dumps({"tool": "github.merge_pull_request", "repo": repo, "pr": pr, "base": base, "method": method, "head": head},
                       separators=(",", ":")).encode()
 
 
@@ -37,8 +37,10 @@ class FakeGitHub:
     """Enough of the GitHub REST API: GET a PR, POST a status, PUT a merge (409 unless sha == head)."""
     def __init__(self):
         self.prs = {(REPO, PR): {"number": PR, "state": "open", "merged": False, "head": {"sha": HEAD},
-                                 "base": {"repo": {"full_name": REPO}}}}
+                                 "base": {"ref": "main", "repo": {"full_name": REPO}}}}
         self.calls, self.statuses, self.merges = [], [], []
+        # Called after each PR GET is answered (tests use it to retarget the PR between the gate's calls).
+        self.after_get = None
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -61,7 +63,12 @@ class FakeGitHub:
                 parts = self.path.strip("/").split("/")
                 if method == "GET" and len(parts) == 5 and parts[3] == "pulls":
                     pr = fake.prs.get((f"{parts[1]}/{parts[2]}", int(parts[4])))
-                    return self._send(200, pr) if pr else self._send(404, {"message": "Not Found"})
+                    if not pr:
+                        return self._send(404, {"message": "Not Found"})
+                    self._send(200, json.loads(json.dumps(pr)))
+                    if fake.after_get:
+                        fake.after_get(pr)
+                    return None
                 if method == "POST" and len(parts) == 5 and parts[3] == "statuses":
                     b = self._body(); b["sha"] = parts[4]; b["repo"] = f"{parts[1]}/{parts[2]}"
                     fake.statuses.append(b)
@@ -109,7 +116,7 @@ def test_approve_posts_success_on_the_exact_sha(gh, ghome):
     rec = req()
     r = go(gh, ghome, rec, reply_for(rec, 1))
     assert r.code == 0, r.message
-    assert gh.statuses == [{"state": "success", "context": "prime-approve", "sha": HEAD, "repo": REPO,
+    assert gh.statuses == [{"state": "success", "context": "prime-approve/main", "sha": HEAD, "repo": REPO,
                             "description": f"Approved on Prime · code {rec.code}"}]
 
 
@@ -132,7 +139,7 @@ def test_wrong_repo_refuses(gh, ghome):
     r = go(gh, ghome, rec, reply_for(rec, 1))
     assert r.code == 2 and "404" in r.message and gh.statuses == []
     # GitHub answers for a different repo (e.g. a redirect): still refused.
-    gh.prs[("evil/other-repo", PR)] = dict(gh.prs[(REPO, PR)])
+    gh.prs[("evil/other-repo", PR)] = json.loads(json.dumps(gh.prs[(REPO, PR)]))
     rec = req(merge_action(repo="evil/other-repo"))
     r = go(gh, ghome, rec, reply_for(rec, 1))
     assert r.code == 2 and "wrong repo" in r.message and gh.statuses == []
@@ -213,7 +220,7 @@ def test_cli_gate_never_prints_the_token(gh, ghome, tmp_path, capsys, monkeypatc
     rf = tmp_path / "request.txt"; rf.write_text(rec.qr + "\n")
     code = cli.main(["gate", str(rf), reply_for(rec, 1), "--api", gh.url, "--gate-home", str(ghome), "--token-from-env"])
     out = capsys.readouterr()
-    assert code == 0 and "POSTED prime-approve=success" in out.out
+    assert code == 0 and "POSTED prime-approve/main=success" in out.out
     assert TOKEN not in out.out + out.err
     monkeypatch.delenv("GITHUB_TOKEN")
     tf = tmp_path / "tok"; tf.write_text(TOKEN)
@@ -248,3 +255,46 @@ def test_gate_prefers_its_own_token_file_over_the_environment(tmp_path, monkeypa
     monkeypatch.delenv("GITHUB_TOKEN")
     with pytest.raises(gate.ProtocolError, match="not set"):
         gate.load_token(None, home, from_env=True)
+
+
+# ---- Item 16: the base (target) branch is part of the approval ----
+
+def test_status_context_names_the_base(gh, ghome):
+    gh.prs[(REPO, PR)]["base"]["ref"] = "release/1.2"
+    rec = req(merge_action(base="release/1.2"))
+    r = go(gh, ghome, rec, reply_for(rec, 1))
+    assert r.code == 0, r.message
+    assert [s["context"] for s in gh.statuses] == ["prime-approve/release/1.2"]
+    assert "prime-approve/release/1.2=success" in r.message
+    # The same PR approved for main gets its own context; one never stands in for the other.
+    gh.prs[(REPO, PR)]["base"]["ref"] = "main"
+    rec = req(merge_action(base="main"))
+    assert go(gh, ghome, rec, reply_for(rec, 1)).code == 0
+    assert [s["context"] for s in gh.statuses] == ["prime-approve/release/1.2", "prime-approve/main"]
+    assert gate.context_for("main") == "prime-approve/main"
+
+
+def test_deny_status_is_per_base_too(gh, ghome):
+    rec = req()
+    assert go(gh, ghome, rec, reply_for(rec, 2)).code == 1
+    assert gh.statuses[0]["context"] == "prime-approve/main" and gh.statuses[0]["state"] == "failure"
+
+
+def test_merge_mode_rechecks_base_right_before_merging(gh, ghome):
+    rec = req()
+    calls = []
+
+    def retarget_after_first_look(pr):
+        calls.append(1)
+        if len(calls) == 1:
+            pr["base"]["ref"] = "release"
+    gh.after_get = retarget_after_first_look
+    r = go(gh, ghome, rec, reply_for(rec, 1), mode="merge")
+    assert r.code == 2 and "base moved right before the merge" in r.message, r.message
+    assert gh.merges == [] and not gh.prs[(REPO, PR)]["merged"] and len(calls) == 2
+
+
+def test_merge_mode_merges_into_the_approved_base(gh, ghome):
+    rec = req()
+    r = go(gh, ghome, rec, reply_for(rec, 1), mode="merge")
+    assert r.code == 0 and "into main" in r.message and len(gh.merges) == 1
