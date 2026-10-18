@@ -39,7 +39,7 @@ class FakeGitHub:
         self.prs = {(REPO, PR): {"number": PR, "state": "open", "merged": False, "head": {"sha": HEAD},
                                  "base": {"ref": "main", "repo": {"full_name": REPO}}}}
         self.calls, self.statuses, self.merges = [], [], []
-        # Called after each PR GET is answered (tests use it to retarget the PR between the gate's calls).
+        # Called on each PR GET, after the answer is taken (tests use it to retarget the PR between the gate's calls).
         self.after_get = None
         fake = self
 
@@ -65,10 +65,12 @@ class FakeGitHub:
                     pr = fake.prs.get((f"{parts[1]}/{parts[2]}", int(parts[4])))
                     if not pr:
                         return self._send(404, {"message": "Not Found"})
-                    self._send(200, json.loads(json.dumps(pr)))
+                    # Answer with the PR as it is now; any change after_get makes shows on the NEXT GET.
+                    # (Applied before sending, so the next request can't overtake it.)
+                    snapshot = json.loads(json.dumps(pr))
                     if fake.after_get:
                         fake.after_get(pr)
-                    return None
+                    return self._send(200, snapshot)
                 if method == "POST" and len(parts) == 5 and parts[3] == "statuses":
                     b = self._body(); b["sha"] = parts[4]; b["repo"] = f"{parts[1]}/{parts[2]}"
                     fake.statuses.append(b)
