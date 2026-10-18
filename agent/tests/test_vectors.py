@@ -55,5 +55,31 @@ def test_base45_rfc9285():
 
 
 def test_pairing_code_shape():
-    c = pairing_code(public_bytes(signing_key(bytes([1]) * 32)), public_bytes(signing_key(bytes([7]) * 32)))
+    a, p = public_bytes(signing_key(bytes([1]) * 32)), public_bytes(signing_key(bytes([7]) * 32))
+    c = pairing_code(a, p, bytes([0x42]) * 16)
     assert len(c) == 29 and len(c.split(" ")) == 6
+    # Same vector as pairing_code_mixes_the_primes_nonce in proto.rs.
+    assert c.replace(" ", "") == hashlib.sha256(b"prime-approve pair v2" + a + p + bytes([0x42]) * 16).digest()[:12].hex().upper()
+    assert pairing_code(a, p, bytes([0x43]) * 16) != c
+    with pytest.raises(ProtocolError):
+        pairing_code(a, p, b"short")
+
+
+def test_paired_answer_must_be_v2_with_a_nonce():
+    """Item 17: same refusals as paired_answer_must_be_v2_with_a_well_formed_nonce in proto.rs."""
+    import json
+    from primeapprove.protocol import PAIRED_DOMAIN, PAIRED_PREFIX, b64e, verify_paired_reply
+    agent = public_bytes(signing_key(bytes([1]) * 32))
+    app = signing_key(bytes([7]) * 32)
+    pk, k = public_bytes(app).hex(), kid(agent)
+
+    def sign(body, prefix=PAIRED_PREFIX, domain=PAIRED_DOMAIN):
+        raw = json.dumps(body, separators=(",", ":")).encode()
+        return f"{prefix}{b64e(raw)}.{b64e(app.sign(domain + raw))}"
+    with pytest.raises(ProtocolError):
+        verify_paired_reply(sign({"kid": k, "app_pk": pk}, "primeapprove:paired:v1:", b"primeapprove-paired-v1\n"), agent)
+    for body in ({"kid": k, "app_pk": pk}, {"kid": k, "app_pk": pk, "nonce": "4242"},
+                 {"kid": k, "app_pk": pk, "nonce": "AB" * 16}, {"kid": k, "app_pk": pk, "nonce": "42" * 16, "x": 1}):
+        with pytest.raises(ProtocolError):
+            verify_paired_reply(sign(body), agent)
+    assert verify_paired_reply(sign({"kid": k, "app_pk": pk, "nonce": "42" * 16}), agent) == (public_bytes(app), bytes([0x42]) * 16)

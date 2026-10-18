@@ -4545,7 +4545,7 @@ dependencies = [
 
 [[package]]
 name = "prime-approve"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
