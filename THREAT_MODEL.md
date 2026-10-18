@@ -1,6 +1,6 @@
 # Prime Approve threat model
 
-Status: draft for v0.5. Simulator-tested only, not yet run on Passport Prime hardware.
+Status: **v0.7, simulator only.** Not yet run on Passport Prime hardware.
 
 ## What Prime Approve is for
 
@@ -52,7 +52,8 @@ When the Prime shows a request inside the bordered panel and the person slides t
 | Approver doesn't compare codes carefully | Partly mitigated | Action code plus shape row; clear-signing reduces reliance on comparison |
 | Unattended unlocked Prime | Open | Short expiry; ask Foundation about a KeyOS-drawn confirmation for high-impact approvals |
 | Lost Prime | Open | Key epoch in HKDF info ("app key v1" to v2) and unpairing at the agent or gate |
-| Key swapped during pairing | Blocked | Pairing code from both keys, compared on both screens; saved only on "Codes match"; agent pins the Prime's key after its user confirms |
+| Key swapped during pairing | Blocked | Pairing code from both keys and a fresh nonce the Prime picks for each pairing (v0.7), compared on both screens; saved only on "Codes match"; agent pins the Prime's key after its user confirms. The nonce makes every code single-use; it does not replace the comparison |
+| Simulator approval mistaken for a real Prime's on GitHub | Mitigated | `pa gate-trust --simulator` marks the pinned key; the gate's status then says "Approved in simulator". Default is not simulator, so marking it is up to whoever pins the key |
 | Unpaired agent keeps access | Blocked | Unpairing is saved and survives a restart; that agent's requests are refused |
 | Fork reuses our app-id | Documented | The app key derives from app-id plus master seed; forks must change the app-id |
 

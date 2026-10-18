@@ -18,10 +18,13 @@ pub const REPLY_LEN: usize = 1 + 1 + 8 + 4 + 64;
 /// Pairing: the agent's offer (signed by the agent key it wants paired, proving it holds that key)
 /// and the Prime's answer (signed by the app key the agent must pin).
 pub const PAIR_PREFIX: &str = "primeapprove:pair:v1:";
-pub const PAIRED_PREFIX: &str = "primeapprove:paired:v1:";
+/// v2 (item 17): the answer carries a fresh 16-byte nonce from the Prime, mixed into the pairing code.
+pub const PAIRED_PREFIX: &str = "primeapprove:paired:v2:";
 const PAIR_DOMAIN: &[u8] = b"primeapprove-pair-v1\n";
-const PAIRED_DOMAIN: &[u8] = b"primeapprove-paired-v1\n";
-const PAIR_CODE_DOMAIN: &[u8] = b"prime-approve pair v1";
+const PAIRED_DOMAIN: &[u8] = b"primeapprove-paired-v2\n";
+const PAIR_CODE_DOMAIN: &[u8] = b"prime-approve pair v2";
+/// Bytes of the Prime's fresh pairing nonce.
+pub const PAIR_NONCE_LEN: usize = 16;
 /// Names are given by the person on the Prime, never by the agent.
 pub const MAX_AGENT_NAME: usize = 24;
 /// Most agents a Prime keeps paired at once.
@@ -128,11 +131,15 @@ pub struct PairOffer {
 
 /// What the Prime shows back after the person taps Pair.
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct PairedReply {
     /// Key id of the agent key that was paired.
     pub kid: String,
     /// The Prime's app public key, 64 hex chars. The agent pins this.
     pub app_pk: String,
+    /// Fresh random value the Prime picked for this pairing, 32 hex chars. Mixed into the pairing code,
+    /// so every pairing shows a new code, even for the same two keys.
+    pub nonce: String,
 }
 
 /// Key id: first 16 hex chars of SHA-256(public key). Agents are looked up by this, never by display name.
@@ -452,10 +459,12 @@ pub fn valid_agent_name(name: &str) -> bool {
 }
 
 /// Pairing code shown on BOTH screens: the first 12 bytes of
-/// SHA-256("prime-approve pair v1" || agent_pk || app_pk), as 6 groups of 4 uppercase hex chars.
-/// If someone swapped either key on the way, the two screens show different codes.
-pub fn pairing_code(agent_pk: &VerifyingKey, app_pk: &VerifyingKey) -> String {
-    let d = Sha256::digest([PAIR_CODE_DOMAIN, agent_pk.as_bytes(), app_pk.as_bytes()].concat());
+/// SHA-256("prime-approve pair v2" || agent_pk || app_pk || nonce), as 6 groups of 4 uppercase hex chars,
+/// where `nonce` is the 16 random bytes the Prime picked for this pairing and sent in its answer.
+/// If someone swapped either key (or the nonce) on the way, the two screens show different codes, and
+/// no two pairings show the same code.
+pub fn pairing_code(agent_pk: &VerifyingKey, app_pk: &VerifyingKey, nonce: &[u8; PAIR_NONCE_LEN]) -> String {
+    let d = Sha256::digest([PAIR_CODE_DOMAIN, agent_pk.as_bytes(), app_pk.as_bytes(), nonce].concat());
     let h = hex::encode_upper(&d[..12]);
     (0..6).map(|i| &h[i * 4..i * 4 + 4]).collect::<Vec<_>>().join(" ")
 }
@@ -494,22 +503,25 @@ pub fn decode_pair_offer(qr: &str, now: Option<u64>) -> Result<VerifyingKey, Rej
     Ok(pk)
 }
 
-/// Prime side: the answer QR, signed by the app key.
-pub fn encode_paired_reply(agent_pk: &VerifyingKey, app: &SigningKey) -> String {
-    let body = serde_json::to_vec(&PairedReply { kid: kid(agent_pk), app_pk: hex::encode(app.verifying_key().as_bytes()) }).unwrap();
+/// Prime side: the answer QR, signed by the app key. `nonce` must be fresh random bytes for this pairing
+/// (the same ones the Prime used for the code on its own screen).
+pub fn encode_paired_reply(agent_pk: &VerifyingKey, app: &SigningKey, nonce: &[u8; PAIR_NONCE_LEN]) -> String {
+    let body = serde_json::to_vec(&PairedReply { kid: kid(agent_pk), app_pk: hex::encode(app.verifying_key().as_bytes()), nonce: hex::encode(nonce) }).unwrap();
     let sig = app.sign(&[PAIRED_DOMAIN, &body].concat());
     format!("{PAIRED_PREFIX}{}.{}", B64.encode(&body), B64.encode(sig.to_bytes()))
 }
 
-/// Agent side: checks the Prime's answer and returns the app key to PIN. From then on the agent
-/// must check every reply against this pinned key (`verify_reply`) and reject any other key.
-/// The agent must also show `pairing_code(own_pk, app_pk)` so the person can compare it.
-pub fn verify_paired_reply(qr: &str, agent_pk: &VerifyingKey) -> Option<VerifyingKey> {
+/// Agent side: checks the Prime's answer and returns the app key to PIN and the Prime's nonce. From then
+/// on the agent must check every reply against this pinned key (`verify_reply`) and reject any other key.
+/// The agent must also show `pairing_code(own_pk, app_pk, nonce)` so the person can compare it.
+pub fn verify_paired_reply(qr: &str, agent_pk: &VerifyingKey) -> Option<(VerifyingKey, [u8; PAIR_NONCE_LEN])> {
     let (body, sig) = split_signed(qr, PAIRED_PREFIX).ok()?;
     let r: PairedReply = serde_json::from_slice(&body).ok()?;
     let app_pk = parse_pk(&r.app_pk)?;
     app_pk.verify_strict(&[PAIRED_DOMAIN, &body].concat(), &sig).ok()?;
-    (r.kid == kid(agent_pk)).then_some(app_pk)
+    let nonce: [u8; PAIR_NONCE_LEN] = fixed(&r.nonce)?;
+    if r.nonce != hex::encode(nonce) { return None; } // lowercase hex only, one spelling per nonce
+    (r.kid == kid(agent_pk)).then_some((app_pk, nonce))
 }
 
 // ---------------------------------------------------------------- pairing: pending, then confirm
@@ -945,6 +957,8 @@ mod tests {
     // ---- Pairing (item 10) ----
 
     fn agent_sk(n: u8) -> SigningKey { SigningKey::from_bytes(&[n; 32]) }
+    /// Fixed TEST nonce; the app always uses fresh random bytes.
+    const NONCE: [u8; PAIR_NONCE_LEN] = [0x42; PAIR_NONCE_LEN];
     const NOW: u64 = 1_800_000_000;
 
     #[test]
@@ -959,9 +973,10 @@ mod tests {
         let body = String::from_utf8(B64.decode(offer.strip_prefix(PAIR_PREFIX).unwrap().split_once('.').unwrap().0).unwrap()).unwrap();
         assert!(!body.contains("name"));
 
-        let reply = encode_paired_reply(&pk, &app);
+        let reply = encode_paired_reply(&pk, &app, &NONCE);
         println!("paired reply {} bytes", reply.len());
-        let pinned = verify_paired_reply(&reply, &agent.verifying_key()).expect("valid paired reply");
+        let (pinned, nonce) = verify_paired_reply(&reply, &agent.verifying_key()).expect("valid paired reply");
+        assert_eq!(nonce, NONCE);
         assert_eq!(pinned, app.verifying_key(), "agent pins the Prime's app key");
         // Wrong agent: the reply names a different kid.
         assert!(verify_paired_reply(&reply, &agent_sk(2).verifying_key()).is_none());
@@ -985,7 +1000,7 @@ mod tests {
         let forged = format!("{head}.{}", B64.encode(other.to_bytes()));
         assert!(matches!(decode_pair_offer(&forged, Some(NOW)), Err(Reject::BadSignature)));
         // A paired reply with a flipped body byte fails too.
-        let reply = encode_paired_reply(&agent_sk(1).verifying_key(), &agent_sk(7));
+        let reply = encode_paired_reply(&agent_sk(1).verifying_key(), &agent_sk(7), &NONCE);
         let mut b: Vec<char> = reply.chars().collect();
         let i = PAIRED_PREFIX.len() + 10;
         b[i] = if b[i] == 'A' { 'B' } else { 'A' };
@@ -1013,18 +1028,62 @@ mod tests {
     #[test]
     fn pairing_code_matches_both_ways_and_binds_both_keys() {
         let (a, p) = (agent_sk(1).verifying_key(), agent_sk(7).verifying_key());
-        let code = pairing_code(&a, &p);
+        let code = pairing_code(&a, &p, &NONCE);
         assert_eq!(code.len(), 29);
         assert_eq!(code.split(' ').count(), 6);
         assert!(code.split(' ').all(|g| g.len() == 4 && g.chars().all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c))));
         // The agent computes it from its own key and the pinned app key from the paired reply.
-        let reply = encode_paired_reply(&a, &agent_sk(7));
-        let pinned = verify_paired_reply(&reply, &a).unwrap();
-        assert_eq!(pairing_code(&a, &pinned), code);
-        assert_ne!(pairing_code(&agent_sk(2).verifying_key(), &p), code, "agent key swapped");
-        assert_ne!(pairing_code(&a, &agent_sk(8).verifying_key()), code, "app key swapped");
-        assert_ne!(pairing_code(&p, &a), code, "order matters");
+        let reply = encode_paired_reply(&a, &agent_sk(7), &NONCE);
+        let (pinned, nonce) = verify_paired_reply(&reply, &a).unwrap();
+        assert_eq!(pairing_code(&a, &pinned, &nonce), code);
+        assert_ne!(pairing_code(&agent_sk(2).verifying_key(), &p, &NONCE), code, "agent key swapped");
+        assert_ne!(pairing_code(&a, &agent_sk(8).verifying_key(), &NONCE), code, "app key swapped");
+        assert_ne!(pairing_code(&p, &a, &NONCE), code, "order matters");
+        assert_ne!(pairing_code(&a, &p, &[0x43; PAIR_NONCE_LEN]), code, "nonce changed");
         println!("pairing code {code}");
+    }
+
+    // ---- Pairing nonce (item 17) ----
+
+    /// Pairing code test vector: agent seed [1; 32], app seed [7; 32], nonce [0x42; 16].
+    #[test]
+    fn pairing_code_mixes_the_primes_nonce() {
+        let (a, app) = (agent_sk(1).verifying_key(), agent_sk(7));
+        let code = pairing_code(&a, &app.verifying_key(), &NONCE);
+        let raw = Sha256::digest([&b"prime-approve pair v2"[..], a.as_bytes(), app.verifying_key().as_bytes(), &NONCE].concat());
+        assert_eq!(code.replace(' ', ""), hex::encode_upper(&raw[..12]));
+        // Same two keys, a fresh nonce: a different code, so a code seen at one pairing is no good at the next.
+        let r1 = encode_paired_reply(&a, &app, &[1; PAIR_NONCE_LEN]);
+        let r2 = encode_paired_reply(&a, &app, &[2; PAIR_NONCE_LEN]);
+        let (k1, n1) = verify_paired_reply(&r1, &a).unwrap();
+        let (k2, n2) = verify_paired_reply(&r2, &a).unwrap();
+        assert_eq!(k1, k2);
+        assert_ne!(pairing_code(&a, &k1, &n1), pairing_code(&a, &k2, &n2));
+        println!("pairing code vector {code}; answer {} bytes", r1.len());
+    }
+
+    #[test]
+    fn paired_answer_must_be_v2_with_a_well_formed_nonce() {
+        let (a, app) = (agent_sk(1).verifying_key(), agent_sk(7));
+        let sign = |body: &str, prefix: &str, domain: &[u8]| {
+            let sig = app.sign(&[domain, body.as_bytes()].concat());
+            format!("{prefix}{}.{}", B64.encode(body), B64.encode(sig.to_bytes()))
+        };
+        let pk = hex::encode(app.verifying_key().as_bytes());
+        let k = kid(&a);
+        // A v1 answer (no nonce, old prefix and domain) is refused.
+        assert!(verify_paired_reply(&sign(&format!(r#"{{"kid":"{k}","app_pk":"{pk}"}}"#), "primeapprove:paired:v1:", b"primeapprove-paired-v1\n"), &a).is_none());
+        // v2 prefix but no nonce, a short nonce, upper-case hex, an extra field: refused.
+        for body in [
+            format!(r#"{{"kid":"{k}","app_pk":"{pk}"}}"#),
+            format!(r#"{{"kid":"{k}","app_pk":"{pk}","nonce":"4242"}}"#),
+            format!(r#"{{"kid":"{k}","app_pk":"{pk}","nonce":"{}"}}"#, "AB".repeat(16)),
+            format!(r#"{{"kid":"{k}","app_pk":"{pk}","nonce":"{}","x":1}}"#, "42".repeat(16)),
+        ] {
+            assert!(verify_paired_reply(&sign(&body, PAIRED_PREFIX, PAIRED_DOMAIN), &a).is_none(), "{body}");
+        }
+        let ok = format!(r#"{{"kid":"{k}","app_pk":"{pk}","nonce":"{}"}}"#, "42".repeat(16));
+        assert_eq!(verify_paired_reply(&sign(&ok, PAIRED_PREFIX, PAIRED_DOMAIN), &a), Some((app.verifying_key(), NONCE)));
     }
 
     // ---- Pairing is saved only after the person confirms the codes match (item 10.1) ----

@@ -28,12 +28,13 @@ __all__ = [
 
 REQ_PREFIX = "primeapprove:v2:"
 PAIR_PREFIX = "primeapprove:pair:v1:"
-PAIRED_PREFIX = "primeapprove:paired:v1:"
+PAIRED_PREFIX = "primeapprove:paired:v2:"
 REPLY_PREFIX = "PA1:"
 REQ_DOMAIN = b"primeapprove-req-v2\n"
 PAIR_DOMAIN = b"primeapprove-pair-v1\n"
-PAIRED_DOMAIN = b"primeapprove-paired-v1\n"
-PAIR_CODE_DOMAIN = b"prime-approve pair v1"
+PAIRED_DOMAIN = b"primeapprove-paired-v2\n"
+PAIR_CODE_DOMAIN = b"prime-approve pair v2"
+PAIR_NONCE_LEN = 16
 REPLY_DOMAIN = b"primeapprove-reply-v1\n"
 REPLY_VERSION = 1
 REPLY_LEN = 78
@@ -95,9 +96,12 @@ def fingerprint(pk: bytes) -> str:
     return f"{d[:4].hex()}…{d[28:].hex()}"
 
 
-def pairing_code(agent_pk: bytes, app_pk: bytes) -> str:
-    """First 12 bytes of SHA-256("prime-approve pair v1" || agent_pk || app_pk), 6 groups of 4 hex."""
-    h = hashlib.sha256(PAIR_CODE_DOMAIN + agent_pk + app_pk).digest()[:12].hex().upper()
+def pairing_code(agent_pk: bytes, app_pk: bytes, nonce: bytes) -> str:
+    """First 12 bytes of SHA-256("prime-approve pair v2" || agent_pk || app_pk || nonce), 6 groups of 4 hex.
+    `nonce` is the 16 fresh bytes from the Prime's answer, so every pairing shows a new code."""
+    if len(nonce) != PAIR_NONCE_LEN:
+        raise ProtocolError(f"pairing nonce is {PAIR_NONCE_LEN} bytes")
+    h = hashlib.sha256(PAIR_CODE_DOMAIN + agent_pk + app_pk + nonce).digest()[:12].hex().upper()
     return " ".join(h[i:i + 4] for i in range(0, 24, 4))
 
 
@@ -363,21 +367,27 @@ def encode_pair_offer(sk: Ed25519PrivateKey, exp: int) -> str:
     return f"{PAIR_PREFIX}{b64e(raw)}.{b64e(sk.sign(PAIR_DOMAIN + raw))}"
 
 
-def verify_paired_reply(qr: str, agent_pk: bytes) -> bytes:
-    """Checks the Prime's pairing answer; returns the Prime's app key. Do NOT pin it until the person
-    confirms `pairing_code(agent_pk, app_pk)` matches the code on the Prime."""
+def verify_paired_reply(qr: str, agent_pk: bytes) -> tuple[bytes, bytes]:
+    """Checks the Prime's pairing answer (v2); returns (the Prime's app key, the Prime's 16-byte nonce).
+    Do NOT pin the key until the person confirms `pairing_code(agent_pk, app_pk, nonce)` matches the code
+    on the Prime."""
     body, sig = _split_signed(qr, PAIRED_PREFIX)
     try:
-        r = json.loads(body)
+        r = json.loads(body, object_pairs_hook=_no_dups)
+        if not isinstance(r, dict) or set(r) != {"kid", "app_pk", "nonce"}:
+            raise ValueError
         app_pk = bytes.fromhex(r["app_pk"])
         their_kid = r["kid"]
-    except (ValueError, KeyError, TypeError):
+        nonce = bytes.fromhex(r["nonce"])
+        if len(nonce) != PAIR_NONCE_LEN or r["nonce"] != nonce.hex():
+            raise ValueError
+    except (ValueError, KeyError, TypeError, AttributeError):
         raise ProtocolError("bad pairing answer") from None
     if len(app_pk) != 32 or not _verify(app_pk, sig, PAIRED_DOMAIN + body):
         raise ProtocolError("pairing answer signature doesn't verify")
     if their_kid != kid(agent_pk):
         raise ProtocolError("this pairing answer is for a different agent key")
-    return app_pk
+    return app_pk, nonce
 
 
 # ------------------------------------------------------------------ replies

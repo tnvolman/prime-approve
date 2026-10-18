@@ -1,0 +1,11 @@
+Item 17 check, October 17, 2026 (simulator, demo build). Offer from 'pa pair --text' (fresh test key), typed in through Paste.
+Prime screens: pairing code 99A7 F2AF CFF5 B6AD A7E6 8185.
+Answer QR decoded from the screenshot with zbarimg, then 'pa pair-accept':
+
+The Prime's answer is validly signed. Prime key 7bd35a5e…b6503b2e
+
+    PAIRING CODE  99A7 F2AF CFF5 B6AD A7E6 8185
+
+Does the Prime show the same code? [y/N] Not pinned. Tap Don't match on the Prime too, so it saves nothing either.
+
+(answered n: nothing pinned, and Codes match was not tapped, so nothing was saved on the Prime)

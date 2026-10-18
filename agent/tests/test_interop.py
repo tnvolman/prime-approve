@@ -32,9 +32,11 @@ def test_rust_replies_verify_in_python():
 
 def test_rust_paired_reply_and_pairing_code():
     agent_pk = public_bytes(signing_key(TEST_AGENT_SEED))
-    app_pk = verify_paired_reply(RUST["paired_reply"], agent_pk)
-    assert app_pk.hex() == RUST["app_pk"]
-    assert pairing_code(agent_pk, app_pk) == RUST["pairing_code"] == RUST["pairing_code_1_7"]
+    app_pk, nonce = verify_paired_reply(RUST["paired_reply"], agent_pk)
+    assert app_pk.hex() == RUST["app_pk"] and nonce.hex() == RUST["pair_nonce"]
+    assert pairing_code(agent_pk, app_pk, nonce) == RUST["pairing_code"] == RUST["pairing_code_1_7"]
+    # Item 17: the nonce is part of the code; Rust and Python agree on a different nonce too.
+    assert pairing_code(agent_pk, app_pk, bytes([0x43]) * 16) == RUST["pairing_code_other_nonce"] != RUST["pairing_code"]
 
 
 def _kid():

@@ -26,6 +26,8 @@ mod interop {
     /// The Rust tests' public TEST app key, same as in proto.rs.
     fn app() -> SigningKey { SigningKey::from_bytes(&[7u8; 32]) }
     const AT: u64 = 1_800_000_000;
+    /// Fixed TEST pairing nonce (the app always uses fresh random bytes).
+    const NONCE: [u8; PAIR_NONCE_LEN] = [0x42; PAIR_NONCE_LEN];
 
     #[test]
     fn python_request_is_accepted() {
@@ -80,9 +82,11 @@ mod interop {
             "reply_approve": encode_reply(&req, true, None, &app, AT),
             "reply_deny_wrong_action": encode_reply(&req, false, Some("wrong_action"), &app, AT),
             "reply_deny": encode_reply(&req, false, None, &app, AT),
-            "paired_reply": encode_paired_reply(&agent_pk(&v), &app),
-            "pairing_code": pairing_code(&agent_pk(&v), &app.verifying_key()),
-            "pairing_code_1_7": pairing_code(&SigningKey::from_bytes(&[1u8; 32]).verifying_key(), &app.verifying_key()),
+            "pair_nonce": hex::encode(NONCE),
+            "paired_reply": encode_paired_reply(&agent_pk(&v), &app, &NONCE),
+            "pairing_code": pairing_code(&agent_pk(&v), &app.verifying_key(), &NONCE),
+            "pairing_code_1_7": pairing_code(&SigningKey::from_bytes(&[1u8; 32]).verifying_key(), &app.verifying_key(), &NONCE),
+            "pairing_code_other_nonce": pairing_code(&agent_pk(&v), &app.verifying_key(), &[0x43; PAIR_NONCE_LEN]),
         });
         let text = serde_json::to_string_pretty(&out).unwrap() + "\n";
         let path = fixture("rust_to_py.json");

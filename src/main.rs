@@ -76,8 +76,9 @@ struct App {
     current_label: String,
     /// Key of the agent that signed `current` (offered for unpairing after "Don't recognize this").
     current_key: Option<VerifyingKey>,
-    /// Agent key waiting on the pair-confirm screen.
-    pending_pair: Option<VerifyingKey>,
+    /// Agent key waiting on the pair-confirm screen, with the fresh nonce this Prime picked for the
+    /// pairing (mixed into the code on screen, and sent in the answer).
+    pending_pair: Option<(VerifyingKey, [u8; PAIR_NONCE_LEN])>,
     /// Pairing shown on the answer screen, waiting for "Codes match". Memory only: never saved until
     /// confirmed, and dropped if the screen is left any other way or the app relaunches.
     pair_answer: Option<PendingPair>,
@@ -324,8 +325,11 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     ui.set_pair_default(format!("Agent {}", a.state.agents.len() + 1).into());
                     ui.set_pair_error("".into());
                     ui.set_pair_fp(fingerprint(&pk).into());
-                    ui.set_pair_code(code_two_lines(&pairing_code(&pk, &app_pk)).into());
-                    a.pending_pair = Some(pk);
+                    // A fresh nonce for every pairing, so the code is new each time, even for the same keys.
+                    let mut nonce = [0u8; PAIR_NONCE_LEN];
+                    getrandom::getrandom(&mut nonce).expect("TRNG");
+                    ui.set_pair_code(code_two_lines(&pairing_code(&pk, &app_pk, &nonce)).into());
+                    a.pending_pair = Some((pk, nonce));
                     ui.set_page(6);
                 }
                 Err(e) => {
@@ -523,14 +527,14 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             ui.set_pair_error(format!("Use 1 to {MAX_AGENT_NAME} plain letters, digits or symbols.").into());
             return;
         }
-        let (Some(pk), Some(app_key)) = (a.pending_pair.take(), a.app_key.clone()) else { return };
+        let (Some((pk, nonce)), Some(app_key)) = (a.pending_pair.take(), a.app_key.clone()) else { return };
         let hexpk = hex::encode(pk.as_bytes());
         if !a.state.agents.iter().any(|p| p.pk == hexpk) && a.state.agents.len() >= MAX_AGENTS {
             show_error(&ui, "Too many agents", &format!("This Prime already has {MAX_AGENTS} paired agents."), "Unpair one from the home screen, then scan again.");
             return;
         }
-        let reply = encode_paired_reply(&pk, &app_key);
-        let ok = verify_paired_reply(&reply, &pk) == Some(app_key.verifying_key());
+        let reply = encode_paired_reply(&pk, &app_key, &nonce);
+        let ok = verify_paired_reply(&reply, &pk) == Some((app_key.verifying_key(), nonce));
         log::info!("pairing pending (not saved) for {}, reply {} bytes, agent-side verify={ok}", fingerprint(&pk), reply.len());
         let (img, info) = qr_image(&reply, qrcodegen::QrCodeEcc::Low, 284);
         ui.set_reply_qr(img);

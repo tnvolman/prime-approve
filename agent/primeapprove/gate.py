@@ -54,14 +54,15 @@ def _private(p: Path) -> Path:
     return p
 
 
-def trust(prime_pk: bytes, agent_pks: list[bytes], home: Path | None = None) -> Path:
-    """Pins the Prime key and the agent keys this gate accepts (public keys only)."""
+def trust(prime_pk: bytes, agent_pks: list[bytes], home: Path | None = None, *, simulator: bool = False) -> Path:
+    """Pins the Prime key and the agent keys this gate accepts (public keys only). `simulator` records that the
+    Prime key belongs to a KeyOS simulator, not a real Prime; statuses then say "in simulator"."""
     if len(prime_pk) != 32 or not agent_pks or any(len(k) != 32 for k in agent_pks):
         raise ProtocolError("keys are 32 bytes (64 hex chars)")
     path = _private(home or gate_home()) / "gate.json"
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps({"prime_pk": prime_pk.hex(), "agents": [k.hex() for k in agent_pks],
-                               "pinned_at": int(time.time())}, indent=1) + "\n")
+                               "simulator": bool(simulator), "pinned_at": int(time.time())}, indent=1) + "\n")
     os.chmod(tmp, 0o600)
     tmp.replace(path)
     return path
@@ -185,11 +186,13 @@ def run_gate(request_qr: str, reply_qr: str, gh: GitHub, *, mode: str = "status"
             return Result(2, f"REFUSED (base moved right before the merge: PR now targets {b2!r}, approved base is {base!r}; nothing merged)")
         st, m = gh.call("PUT", f"/repos/{repo}/pulls/{pr}/merge", {"sha": head, "merge_method": a["method"]})
         if st == 200 and m.get("merged"):
-            return Result(0, f"MERGED {repo} PR #{pr} into {base} at {head[:12]} ({a['method']}), code {code}", m)
+            sim = " (approved in simulator)" if is_simulator(home) else ""
+            return Result(0, f"MERGED {repo} PR #{pr} into {base} at {head[:12]} ({a['method']}), code {code}{sim}", m)
         return Result(2, f"REFUSED by GitHub ({st}: {m.get('message', 'no message')}); nothing merged", {"status": st, **m})
     state = "success" if reply.approved else "failure"
-    desc = f"Approved on Prime · code {code}" if reply.approved else \
-        f"Denied on Prime{f' ({reply.reason})' if reply.reason else ''} · code {code}"
+    where = "in simulator" if is_simulator(home) else "on Prime"
+    desc = f"Approved {where} · code {code}" if reply.approved else \
+        f"Denied {where}{f' ({reply.reason})' if reply.reason else ''} · code {code}"
     ctx = context_for(base)
     st, s = gh.call("POST", f"/repos/{repo}/statuses/{head}", {"state": state, "context": ctx, "description": desc})
     if st != 201:
@@ -207,6 +210,14 @@ def _consume(home: Path, req_id: str, outcome: str) -> bool:
     return True
 
 
+def is_simulator(home: Path) -> bool:
+    """Whether the pinned Prime key was marked as a simulator key (`pa gate-trust --simulator`). Files from
+    before this flag existed count as not simulator."""
+    path = home / "gate.json"
+    return path.exists() and json.loads(path.read_text()).get("simulator") is True
+
+
 def describe_trust(home: Path) -> str:
     prime_pk, agents = load_trust(home)
-    return f"Prime {fingerprint(prime_pk)}; agents " + ", ".join(fingerprint(k) for k in agents)
+    kind = "simulator (not a real Prime)" if is_simulator(home) else "Prime"
+    return f"{kind} {fingerprint(prime_pk)}; agents " + ", ".join(fingerprint(k) for k in agents)

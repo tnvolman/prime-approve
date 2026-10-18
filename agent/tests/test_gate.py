@@ -298,3 +298,37 @@ def test_merge_mode_merges_into_the_approved_base(gh, ghome):
     rec = req()
     r = go(gh, ghome, rec, reply_for(rec, 1), mode="merge")
     assert r.code == 0 and "into main" in r.message and len(gh.merges) == 1
+
+
+# ---- Item 17: a simulator key says so on GitHub ----
+
+def test_simulator_key_says_approved_in_simulator(gh, tmp_path):
+    home = tmp_path / "simgate"
+    gate.trust(public_bytes(APP), [public_bytes(AGENT)], home, simulator=True)
+    assert gate.is_simulator(home) and "simulator" in gate.describe_trust(home)
+    rec = req()
+    assert go(gh, home, rec, reply_for(rec, 1)).code == 0
+    rec2 = req()
+    assert go(gh, home, rec2, reply_for(rec2, 3)).code == 1
+    assert [s["description"] for s in gh.statuses] == [f"Approved in simulator · code {rec.code}",
+                                                      f"Denied in simulator (wrong_action) · code {rec2.code}"]
+
+
+def test_default_trust_is_not_simulator(gh, ghome, tmp_path):
+    assert not gate.is_simulator(ghome)
+    rec = req()
+    assert go(gh, ghome, rec, reply_for(rec, 1)).code == 0
+    assert gh.statuses[0]["description"] == f"Approved on Prime · code {rec.code}"
+    # A trust file from before the flag existed counts as not simulator.
+    old = tmp_path / "old"; old.mkdir()
+    (old / "gate.json").write_text(json.dumps({"prime_pk": "00" * 32, "agents": ["11" * 32], "pinned_at": 1}))
+    assert not gate.is_simulator(old)
+
+
+def test_cli_gate_trust_simulator_flag(tmp_path, capsys):
+    home = tmp_path / "g"
+    args = ["gate-trust", "--prime-key", public_bytes(APP).hex(), "--agent-key", public_bytes(AGENT).hex(), "--gate-home", str(home)]
+    assert cli.main(args + ["--simulator"]) == 0 and "simulator" in capsys.readouterr().out
+    assert json.loads((home / "gate.json").read_text())["simulator"] is True
+    assert cli.main(args) == 0
+    assert json.loads((home / "gate.json").read_text())["simulator"] is False

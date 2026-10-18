@@ -7,7 +7,7 @@
   pa pair-accept CODE|PHOTO       check the Prime's answer, compare codes, pin the Prime's key on "y"
   pa request --action JSON ...    show a signed request and its action code; remember it as pending
   pa verify CODE|PHOTO            check the Prime's reply; exit 0 only for a valid, unused APPROVE
-  pa gate-trust --prime-key HEX --agent-key HEX   pin keys in the gate's own state dir
+  pa gate-trust --prime-key HEX --agent-key HEX [--simulator]   pin keys in the gate's own state dir
   pa gate REQUEST REPLY [--mode status|merge]      the GitHub gate (run it where the agent can't reach)
 
 CODE|PHOTO is the code text, `-` to read it from stdin, or a photo/screenshot of the QR.
@@ -51,8 +51,8 @@ def cmd_pair(a) -> int:
 def cmd_pair_accept(a) -> int:
     sk = store.load_key()
     pk = public_bytes(sk)
-    app_pk = verify_paired_reply(qr.read_input(a.answer, PAIRED_PREFIX), pk)
-    code = pairing_code(pk, app_pk)
+    app_pk, nonce = verify_paired_reply(qr.read_input(a.answer, PAIRED_PREFIX), pk)
+    code = pairing_code(pk, app_pk, nonce)
     print(f"The Prime's answer is validly signed. Prime key {fingerprint(app_pk)}")
     print(f"\n    PAIRING CODE  {code}\n")
     try:
@@ -162,7 +162,7 @@ def cmd_gate_trust(a) -> int:
         agents = [bytes.fromhex(k) for k in a.agent_key]
     except ValueError:
         raise ProtocolError("keys must be hex") from None
-    path = gate.trust(prime, agents, _gate_home(a))
+    path = gate.trust(prime, agents, _gate_home(a), simulator=a.simulator)
     print(f"Pinned in {path}: {gate.describe_trust(_gate_home(a))}")
     return 0
 
@@ -201,6 +201,8 @@ def main(argv=None) -> int:
     s = sub.add_parser("gate-trust", help="pin the Prime key and agent keys for the gate")
     s.add_argument("--prime-key", required=True, help="the Prime's app public key, 64 hex")
     s.add_argument("--agent-key", required=True, action="append", help="an agent public key, 64 hex (repeatable)")
+    s.add_argument("--simulator", action="store_true",
+                   help="the Prime key belongs to a KeyOS simulator; statuses then say 'Approved in simulator'")
     s.add_argument("--gate-home", help="gate state dir (default $PRIMEAPPROVE_GATE_HOME or ~/.primeapprove-gate)")
     s = sub.add_parser("gate", help="verify a reply and mark (or merge) the exact PR head on GitHub")
     s.add_argument("request", help="the signed request: code text, a text file, `-` or a photo")
