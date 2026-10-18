@@ -8,6 +8,15 @@ Status: v0.4 (compact reply) in progress, simulator-tested only. Not yet run on 
 
 ## Screenshots (KeyOS simulator, color-corrected)
 
+**Base branch on the Prime (v0.7, October 17, 2026):** since item 16 the merge action names the branch it merges into, and the Prime says so in the trusted frame. Left to right: the demo request (action now includes `"base":"main"`, code **F961 B2D1**) reads **Merge PR #2 into main**; its approved reply; a request for the same PR aimed at `release` (built with the Python library, typed in through **Paste**) reads **Merge PR #2 into release** just as plainly, with a different code (5D86 5564); and Recent decisions on the home screen record the base.
+
+<p>
+<img src="docs/screenshots/v0.7/review-into-main.png" width="140" alt="Review: Merge PR #2 into main → tnvolman/typewright-website-audit, code F961 B2D1">
+<img src="docs/screenshots/v0.7/approved-reply-main.png" width="140" alt="Approved reply QR, code F961 B2D1">
+<img src="docs/screenshots/v0.7/review-into-release.png" width="140" alt="Review: Merge PR #2 into release → tnvolman/typewright-website-audit, code 5D86 5564">
+<img src="docs/screenshots/v0.7/home-recent-base.png" width="140" alt="Home: recent decisions record into release and into main">
+</p>
+
 **GitHub gate, live (v0.6, October 17, 2026):** a request built by `pa request` for the real head of [PR #1](https://github.com/tnvolman/prime-approve/pull/1) (a demo PR, left open), approved on the simulator; `pa gate` then posted the green `prime-approve` status on exactly that SHA. After one more push, the new head had no status, and the old replies were refused by the gate and, in merge mode, by GitHub itself (409). The proof card is rendered from the GitHub API output ([text](docs/screenshots/v0.6/gate-proof.txt)).
 
 <p>
@@ -25,7 +34,7 @@ Status: v0.4 (compact reply) in progress, simulator-tested only. Not yet run on 
 <img src="docs/screenshots/v0.5/unknown-raw.png" width="140" alt="Unknown tool: raw action JSON under a yellow Unrecognized action label, high impact">
 </p>
 
-**Agent CLI end to end (v0.4, October 17, 2026):** a demo build's home with the **Paste** button, then a real pairing and approval driven by `pa` on a laptop: the Prime's pair-confirm screen for the `pa` agent key, its answer with the pairing code (`pa pair-accept` showed the same code), the request built by `pa request` (action code 1594 E5CC), and the reply QR that `pa verify` accepted as APPROVED. The codes were typed in through **Paste** because the simulator has no camera.
+**Agent CLI end to end (v0.4, October 17, 2026):** a demo build's home with the **Paste** button, then a real pairing and approval driven by `pa` on a laptop: the Prime's pair-confirm screen for the `pa` agent key, its answer with the pairing code (`pa pair-accept` showed the same code), the request built by `pa request` (action code 1594 E5CC, the demo code before v0.7 added the base branch), and the reply QR that `pa verify` accepted as APPROVED. The codes were typed in through **Paste** because the simulator has no camera.
 
 <p>
 <img src="docs/screenshots/v0.4/demo-home.png" width="140" alt="Demo build home: Request, Pair and Paste buttons">
@@ -61,7 +70,7 @@ Status: v0.4 (compact reply) in progress, simulator-tested only. Not yet run on 
 <p>
 <img src="docs/screenshots/v0.2/home-default.png" width="200" alt="Default build home: no agent paired">
 <img src="docs/screenshots/v0.2/demo-home.png" width="200" alt="Demo build home with the Demo key, not secure banner">
-<img src="docs/screenshots/v0.2/demo-review.png" width="200" alt="Demo request review: Merge PR #2, action code 1594 E5CC">
+<img src="docs/screenshots/v0.2/demo-review.png" width="200" alt="Demo request review: Merge PR #2, action code 1594 E5CC (before the base branch was added)">
 <img src="docs/screenshots/v0.2/scanner.png" width="200" alt="System QR scanner opened from Scan request">
 </p>
 
@@ -140,7 +149,7 @@ App key: Ed25519 from HKDF-SHA256 (salt `prime-approve`, ikm = the KeyOS app see
     pa init                                   # agent key in ~/.primeapprove/agent.key (mode 600, never printed)
     pa pair --png offer.png                   # scan on the Prime, name the agent, tap Pair
     pa pair-accept answer.jpg                 # shows the pairing code; type y only if the Prime shows the same
-    pa request --action '{"tool":"github.merge_pull_request","repo":"you/repo","pr":7,"method":"squash","head":"<40-hex sha>"}' \
+    pa request --action '{"tool":"github.merge_pull_request","repo":"you/repo","pr":7,"base":"main","method":"squash","head":"<40-hex sha>"}' \
         --title "Merge PR #7 into main"
     pa verify reply.jpg && echo "run the action"    # exit 0 only for a valid, unused approve
 
@@ -149,7 +158,7 @@ App key: Ed25519 from HKDF-SHA256 (salt `prime-approve`, ikm = the KeyOS app see
 - **`pa verify`** reads the reply (text, `-` for stdin, or a photo), finds the pending request by its id prefix, verifies it against the **pinned** key over the full id, kid and action hash, and prints `APPROVED`, `DENIED(reason)` or `INVALID (why)`. Exit code 0 only for an approve. An answered request is marked used, so the same reply (or any second reply) is refused. Expired requests are refused.
 - **`pa verify` is not a lock on its own.** If it runs in the same account as the agent, a compromised agent can skip it, answer the pairing prompt itself, or edit its saved requests and pinned key. It becomes a real control only when it runs where the agent can't reach, with the credential behind it: that is the **GitHub gate** below (see rule 4 in [`THREAT_MODEL.md`](THREAT_MODEL.md): don't let the agent hold the credential it is asking approval to use).
 - **Replacing the pinned Prime is deliberate.** If a different Prime key is already pinned, `pa pair-accept` shows the old and new key fingerprints with the warning "This replaces the Prime you trust" and pins only if you type `replace`. Re-pairing the same Prime is a plain `y`.
-- The library mirrors `src/proto.rs` byte for byte, including the action parser: `host-tests/fixtures/actions.json` holds 42 shared parsing cases (known, unknown and rejected actions, including the `\u` look-alikes) that both the Rust and the Python tests run. Its tests (`cd agent && pytest`) reproduce the Rust test vectors (demo hash `1594e5cc…`, action code, glyphs, kid, pairing code, the compact reply vector) and drive the CLI. **Cross tests:** `agent/tests/make_fixtures.py` writes `host-tests/fixtures/py_to_rust.json` (Python-built known, lying-title and unknown-tool requests and a pairing offer), which the Rust host tests accept, including checking that Python's request JSON is byte-identical to serde's. The Rust host tests write `host-tests/fixtures/rust_to_py.json` (Rust-signed replies and a pairing answer), which the Python tests verify. Both sides fail if a fixture drifts.
+- The library mirrors `src/proto.rs` byte for byte, including the action parser: `host-tests/fixtures/actions.json` holds 62 shared parsing cases (known, unknown and rejected actions, including the `\u` look-alikes and the base-branch rules) that both the Rust and the Python tests run. Its tests (`cd agent && pytest`) reproduce the Rust test vectors (demo hash `f961b2d1…`, action code, glyphs, kid, pairing code, the compact reply vector) and drive the CLI. **Cross tests:** `agent/tests/make_fixtures.py` writes `host-tests/fixtures/py_to_rust.json` (Python-built known, lying-title and unknown-tool requests and a pairing offer), which the Rust host tests accept, including checking that Python's request JSON is byte-identical to serde's. The Rust host tests write `host-tests/fixtures/rust_to_py.json` (Rust-signed replies and a pairing answer), which the Python tests verify. Both sides fail if a fixture drifts.
 - **Simulator:** demo builds have a **Paste** button, a text field that goes through the same handler as a scan. `foundation-passport-drive --sim input-text` can type a code into it, 48 characters per call, because the simulator has no camera. Non-demo builds don't have it.
 
 ## Pairing
@@ -180,21 +189,21 @@ Since v0.5 the Prime doesn't take the agent's word for what the action is. The r
 
 | tool | fields (exactly these) | the Prime draws |
 |---|---|---|
-| `github.merge_pull_request` | `repo` (`owner/name`, letters, digits, `- _ .`, 64 chars or less), `pr` (integer above 0), `method` (`merge`, `squash` or `rebase`), `head` (40 lowercase hex) | **Merge → PR #&lt;pr&gt; → &lt;repo&gt;** and `<method> · head <first 7 of head>` |
+| `github.merge_pull_request` | `repo` (`owner/name`, letters, digits, `- _ .`, 64 chars or less), `pr` (integer above 0), `base` (the branch it merges into: 1 to 100 of `A-Z a-z 0-9 . _ / -`, not starting with `-` or `/`, no `..` or `//`, not ending in `/` or `.lock`), `method` (`merge`, `squash` or `rebase`), `head` (40 lowercase hex) | **Merge PR #&lt;pr&gt; into &lt;base&gt; → &lt;repo&gt;** and `<method> · head <first 7 of head>` |
 
-For a known tool, the summary line, the detail line and the amber "High impact" band come **only** from the parsed action. The agent's title and details appear smaller, under **Agent says**, in the scrolling area. A title that says "PR #2" can't change a band that says **PR #9 → evil/other-repo** (see the screenshots above). A known tool with a missing, extra, duplicate or badly formed field is refused, never shown with a friendlier view.
+For a known tool, the summary line, the detail line and the amber "High impact" band come **only** from the parsed action. The agent's title and details appear smaller, under **Agent says**, in the scrolling area. A title that says "PR #2" can't change a band that says **PR #9 → evil/other-repo** (see the screenshots above). Since v0.7 (item 16) the base branch is part of the action, so the line reads **Merge PR #2 into main → …**, and a PR aimed at another branch says so just as plainly (**into release**). A known tool with a missing, extra, duplicate or badly formed field is refused, never shown with a friendlier view.
 
 **Unknown tools** (any other `"tool"`) are allowed, but the Prime shows the raw action JSON exactly as signed, character-wrapped and scrollable, under a yellow **Unrecognized action · read carefully** label. The frame says "Unrecognized: &lt;tool&gt;" and the request is always marked high impact. You have to read it.
 
 **Refused outright:** an action that isn't valid JSON (as `serde_json` reads it: no `NaN`, no lone surrogates), isn't an object with a string `tool`, is over 400 bytes, has anything outside printable ASCII and newline, uses a `\u` escape anywhere, or has a tool name outside `A-Z a-z 0-9 . _ -` (1 to 64 characters). The last two close a look-alike trick: `"github.merge_pull_reque\u0455t"` is plain ASCII on the wire but decodes to a Cyrillic `ѕ`. With no `\u` escapes and that character set, the tool name on screen is always exactly the raw text.
 
-The hash is still plain SHA-256 of the action bytes, so the demo action keeps hash `1594e5cc…` and action code **1594 E5CC**, and the compact reply is unchanged. The arrows are drawn by the app. Recent decisions on the home screen record what the Prime showed (the parsed summary or "Unrecognized: tool"), not the agent's title.
+The hash is plain SHA-256 of the action bytes. Adding `"base":"main"` to the demo action in v0.7 changed its hash to `f961b2d1…` and its action code to **F961 B2D1** (it was `1594e5cc…` / **1594 E5CC**), and with it the compact reply test vector. The arrow is drawn by the app. Recent decisions on the home screen record what the Prime showed (the parsed summary or "Unrecognized: tool"), not the agent's title.
 
 ## GitHub gate
 
-`pa verify` tells an agent whether it was approved; it can't stop a compromised agent from going ahead anyway. The gate makes the approval **enforceable**: it holds the GitHub token, verifies the Prime's reply, and only then marks the **exact PR head commit** with the commit status `prime-approve` (state `success`), or merges that exact commit. With branch protection requiring that status, GitHub won't merge without it.
+`pa verify` tells an agent whether it was approved; it can't stop a compromised agent from going ahead anyway. The gate makes the approval **enforceable**: it holds the GitHub token, verifies the Prime's reply, and only then marks the **exact PR head commit** with the commit status `prime-approve/<base>` (for example `prime-approve/main`, state `success`), or merges that exact commit. With branch protection on main requiring `prime-approve/main`, GitHub won't merge into main without an approval that named main.
 
-> **Until branch protection requires the `prime-approve` check, a green check is only advice:** anyone with write access can still merge. This repo's main is **not Prime-protected** today: the check stays advisory until the five conditions in [docs/DECISIONS.md](docs/DECISIONS.md) are all true.
+> **Until branch protection requires the `prime-approve/main` check, a green check is only advice:** anyone with write access can still merge. This repo's main is **not Prime-protected** today: the check stays advisory until the five conditions in [docs/DECISIONS.md](docs/DECISIONS.md) are all true.
 
     pa gate-trust --prime-key <Prime app key hex> --agent-key <agent public key hex>   # once
     # the gate reads its own token from <gate home>/token (or --token-file); never printed.
@@ -206,26 +215,29 @@ What it checks, in order (any failure refuses and posts nothing):
 1. **The request** (the signed `primeapprove:v2:` text that `pa request --text` prints, a file holding it, or a photo) is signed by an agent key the gate pinned, with exactly the seven fields (no repeats, no extras) and the action through the **same strict parser** as the Prime. The gate hashes those exact action bytes; it never rebuilds the action from its fields.
 2. **Known tools only.** Anything the Prime shows as "Unrecognized" is refused, even when approved.
 3. **The reply** verifies against the gate's own pinned Prime key over the request id, the agent's kid and that hash, and the request hasn't expired.
-4. **The PR** (GitHub REST API) has the action's repo and number, is open, and its current head SHA equals the action's `head`.
+4. **The PR** (GitHub REST API) has the action's repo and number, is open, its current head SHA equals the action's `head`, and its base branch (`base.ref`) equals the action's `base`. A PR retargeted after approval is refused with "base moved".
 5. **Single use**, recorded in the gate's own store; then it acts:
-   - `--mode status`: `POST /repos/{repo}/statuses/{head}` with `context=prime-approve`, `state=success` and `description="Approved on Prime · code 1594 E5CC"`. A deny posts `state=failure`.
-   - `--mode merge`: `PUT /repos/{repo}/pulls/{n}/merge` with `sha=<approved head>` and `merge_method=<method>`. GitHub itself refuses with 409 if the head moved. A deny merges nothing.
+   - `--mode status`: `POST /repos/{repo}/statuses/{head}` with `context=prime-approve/<base>` (e.g. `prime-approve/main`), `state=success` and `description="Approved on Prime · code F961 B2D1"`. A deny posts `state=failure`. One context per base, so an approval for `release` can never satisfy a check required on `main`.
+   - `--mode merge`: fetches the PR once more and re-checks its base right before `PUT /repos/{repo}/pulls/{n}/merge` with `sha=<approved head>` and `merge_method=<method>`. GitHub itself refuses with 409 if the head moved. GitHub's merge call can't check the base, so a retarget in the moment between that last check and the merge isn't caught (status mode with the required check doesn't have this gap: the context names the base). A deny merges nothing.
 
 Exit codes: 0 done, 1 denied, 2 refused. HTTP is standard-library `urllib`; `--api` (or `PRIMEAPPROVE_GITHUB_API`) points it at another base URL, which the tests use for a local fake GitHub.
 
 **Run it where the agent can't reach.** The gate keeps its **own** state dir (`~/.primeapprove-gate/`, or `$PRIMEAPPROVE_GATE_HOME`, or `--gate-home`), separate from the agent's `~/.primeapprove/`: its own pinned Prime key, its own pinned agent keys, its own used-request records, its own token. Put it on a different machine or a different OS account from the agent, or in a CI job whose definition and secrets the agent can't modify (for example a workflow on a protected branch, triggered by a person, with the token as a repository secret). If the agent can read the gate's token or edit its state, the gate protects nothing.
 
-**Require the check (repository settings, done by a person):** Settings → Branches (or Rules → Rulesets) → protect `main` → *Require status checks to pass before merging* → add `prime-approve`. Keep *Do not allow bypassing the above settings* (or *Include administrators*) on, and give the agent's own token no admin rights. The `prime-approve` context only appears in the picker after the gate has posted it once.
+**Require the check (repository settings, done by a person):** Settings → Branches (or Rules → Rulesets) → protect `main` → *Require status checks to pass before merging* → add `prime-approve/main` (the context names the branch; the old plain `prime-approve` context is no longer posted). Keep *Do not allow bypassing the above settings* (or *Include administrators*) on, and give the agent's own token no admin rights. The `prime-approve/main` context only appears in the picker after the gate has posted it once.
 
-**Why a moved head stays out.** A commit status belongs to one SHA. Pushing anything to the PR makes a new head SHA with no `prime-approve` status, so the required check is missing again until a new request for the new head is approved. The gate also refuses an old reply for a moved head, and merge mode passes the approved SHA to GitHub, which refuses a different head. This was shown live on [PR #1](https://github.com/tnvolman/prime-approve/pull/1) (see the screenshots).
+**Why a retargeted PR stays out (v0.7).** The base branch is in the signed action and shown on the Prime ("into main"). The gate refuses a PR whose base no longer matches, and the status it posts is named for the approved base: a PR approved into `release` and then retargeted to `main` has only `prime-approve/release`, which doesn't satisfy a check required on main. `agent/tests/test_review_base_branch.py` guards this.
+
+**Why a moved head stays out.** A commit status belongs to one SHA. Pushing anything to the PR makes a new head SHA with no `prime-approve/<base>` status, so the required check is missing again until a new request for the new head is approved. The gate also refuses an old reply for a moved head, and merge mode passes the approved SHA to GitHub, which refuses a different head. This was shown live on [PR #1](https://github.com/tnvolman/prime-approve/pull/1) (see the screenshots).
 
 **Residual risks.**
 - **Admins can bypass** branch protection unless bypassing is disabled, and anyone who can change the settings can remove the requirement.
-- **Until the required check comes only from the gate's identity, any token with commit-status write access, including the agent's, can post a fake `prime-approve` success.** Give the agent a fine-grained token without *Commit statuses* or merge rights, or have the gate post as its own GitHub App.
+- **Until the required check comes only from the gate's identity, any token with commit-status write access, including the agent's, can post a fake `prime-approve/<base>` success.** Give the agent a fine-grained token without *Commit statuses* or merge rights, or have the gate post as its own GitHub App.
 - **Pin the check to the gate's App.** GitHub can tie a required status check, including a plain commit status, to one GitHub App, and then a same-named status from anyone else doesn't satisfy it ([GitHub changelog](https://github.blog/changelog/2021-12-01-ensure-required-status-checks-provided-by-the-intended-app/)). That needs the gate to post as its own App, and one status posted by the App before the rule is added. Today the gate posts with a personal token, so this isn't done yet.
 - **An agent that can drive the Prime can approve for itself.** Foundation's `foundation-passport-drive` can tap "approve" in the simulator (`tools/flow.sh` does exactly that) and on a dev unit plugged into the agent's machine with Developer Mode on. Real approvals must come from a Prime the agent can't drive.
 - **The token's scope is the gate's blast radius.** A classic `repo` token can do much more than post statuses; prefer a fine-grained token limited to this repository with *Commit statuses: write* (plus *Pull requests: read*, and *Contents: write* only for merge mode).
-- The approval covers the head commit, not the base: merging into a base that moved is GitHub's normal behavior.
+- The approval names the base **branch**, not the base branch's commit: merging into a branch that gained commits since approval is GitHub's normal behavior.
+- **Merge mode's last-moment retarget.** Merge mode re-checks the base right before the merge call, but GitHub's merge API can't check the base itself, so a retarget in that short window isn't caught. Status mode with the required `prime-approve/main` check has no such window.
 
 ## Visual action code
 
@@ -234,7 +246,7 @@ Under the 8-character action code, the Review screen shows 8 colored shapes. The
 **Rule** (`glyphs()` in `src/proto.rs`):
 
 1. Hex-decode the request's `hash` to 32 bytes `h[0..32]`.
-2. The text action code is `h[0..4]` as uppercase hex, split 4 + 4: `1594 E5CC`.
+2. The text action code is `h[0..4]` as uppercase hex, split 4 + 4: `F961 B2D1`.
 3. Glyph `i` (for `i` = 0 to 7, left to right) comes from byte `b = h[4 + i]`:
    - color id = `b & 7` (the low 3 bits)
    - shape id = `(b >> 3) & 3` (bits 3 and 4)
@@ -263,14 +275,14 @@ The colors are the Okabe-Ito colorblind-safe palette, with white in place of its
 **Test vector** (the simulator demo action; checked by `tests::demo_vector` and by an independent Python check):
 
 ```
-action = {"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}
+action = {"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"base":"main","method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}
          (exact bytes, no trailing newline)
-SHA-256 = 1594e5cc61b278e99dba75aad80d8b2dd41e135820630c1e12584dda3b95d9d8
-code    = 1594 E5CC
-bytes   = 61 b2 78 e9 9d ba 75 aa
-ids     = (color, shape) (1,0) (2,2) (0,3) (1,1) (5,3) (2,3) (5,2) (2,1)
-glyphs  = orange circle, yellow ring, vermillion outlined square, orange square,
-          blue outlined square, yellow outlined square, blue ring, yellow square
+SHA-256 = f961b2d1333fb6d7cabfca5deae7b688bc23179427874fba41550e7c6a4a101d
+code    = F961 B2D1
+bytes   = 33 3f b6 d7 ca bf ca 5d
+ids     = (color, shape) (3,2) (7,3) (6,2) (7,2) (2,1) (7,3) (2,1) (5,3)
+glyphs  = bluish green ring, white outlined square, reddish purple ring, white ring,
+          yellow square, white outlined square, yellow square, blue outlined square
 ```
 
 **Colorblind note.** In simulation (Machado 2009 matrices, CIEDE2000), no two of the 8 colors fall below a ΔE00 of 10.9, whether under protanopia, deuteranopia, tritanopia or normal vision. Every color has at least 3.1:1 contrast against the app background. The shapes still do half the work, so the pattern doesn't depend on color alone. This has not yet been checked on a real Prime screen. See `docs/colorblind.md`, which is reproducible with `tools/colorblind.py`.

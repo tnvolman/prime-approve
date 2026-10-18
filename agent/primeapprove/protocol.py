@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 __all__ = [
     "decode_request", "REQUEST_FIELDS",
     "REQ_PREFIX", "PAIR_PREFIX", "PAIRED_PREFIX", "REPLY_PREFIX", "HIGH_IMPACT_VERBS", "DENY_REASONS",
-    "MAX_QR", "MAX_ACTION", "MAX_LIFETIME_SECS", "ActionView", "action_view", "summary_line", "ProtocolError", "Reply", "RequestRecord",
+    "MAX_QR", "MAX_ACTION", "valid_base", "MAX_LIFETIME_SECS", "ActionView", "action_view", "summary_line", "ProtocolError", "Reply", "RequestRecord",
     "public_bytes", "signing_key", "kid", "action_hash", "action_code", "glyphs", "fingerprint", "pairing_code",
     "b64e", "b64d", "base45_encode", "base45_decode", "build_request", "encode_pair_offer", "verify_paired_reply",
     "parse_reply", "verify_reply", "is_elevated",
@@ -238,6 +238,17 @@ def _valid_repo(r) -> bool:
                for p in r.split("/"))
 
 
+_BASE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-")
+
+
+def valid_base(b) -> bool:
+    """A branch name for `base` (valid_base in proto.rs): 1 to 100 of A-Z a-z 0-9 . _ / -, not starting with
+    - or /, no .. or //, not ending in / or .lock."""
+    return (isinstance(b, str) and 1 <= len(b) <= 100 and all(c in _BASE_CHARS for c in b)
+            and not b.startswith(("-", "/")) and ".." not in b and "//" not in b
+            and not b.endswith("/") and not b.endswith(".lock"))
+
+
 def action_view(action) -> ActionView:
     """Parses action bytes (or str) exactly as the Prime does (action_view in proto.rs). Raises ProtocolError
     for anything the Prime would refuse."""
@@ -266,11 +277,12 @@ def action_view(action) -> ActionView:
             m = json.loads(action, object_pairs_hook=_no_dups)
         except _Dup:
             raise ProtocolError("merge action has missing, extra or repeated fields") from None
-        if set(m) != {"tool", "repo", "pr", "method", "head"}:
+        if set(m) != {"tool", "repo", "pr", "base", "method", "head"}:
             raise ProtocolError("merge action has missing, extra or repeated fields")
         pr, head = m["pr"], m["head"]
         # serde's u64 takes only plain non-negative integers (no 2.0, no "2", no true).
-        if type(pr) is not int or pr < 0 or pr >= 2**64 or not isinstance(m["method"], str) or not isinstance(head, str):
+        if type(pr) is not int or pr < 0 or pr >= 2**64 or not isinstance(m["method"], str) or not isinstance(head, str) \
+                or not isinstance(m["base"], str):
             raise ProtocolError("merge action has missing, extra or repeated fields")
         if not _valid_repo(m["repo"]):
             raise ProtocolError("merge action repo must be owner/name")
@@ -280,13 +292,15 @@ def action_view(action) -> ActionView:
             raise ProtocolError("merge head must be a 40-char lowercase commit SHA")
         if pr == 0:
             raise ProtocolError("merge pr must be a positive number")
-        return ActionView(tool, "Merge", f"PR #{pr}", m["repo"], f"{m['method']} · head {head[:7]}",
-                          {"repo": m["repo"], "pr": pr, "method": m["method"], "head": head})
+        if not valid_base(m["base"]):
+            raise ProtocolError("merge base must be a branch name (1 to 100 of A-Z a-z 0-9 . _ / -)")
+        return ActionView(tool, "Merge", f"PR #{pr} into {m['base']}", m["repo"], f"{m['method']} · head {head[:7]}",
+                          {"repo": m["repo"], "pr": pr, "base": m["base"], "method": m["method"], "head": head})
     return ActionView(tool)
 
 
 def summary_line(view: ActionView) -> str | None:
-    return f"{view.verb} → {view.object} → {view.target}" if view.verb else None
+    return f"{view.verb} {view.object} → {view.target}" if view.verb else None
 
 
 def is_elevated(view: ActionView) -> bool:

@@ -16,10 +16,10 @@ from primeapprove.protocol import build_request, encode_pair_offer, public_bytes
 FIXTURES = Path(__file__).resolve().parents[2] / "host-tests" / "fixtures"
 TEST_AGENT_SEED = bytes([1]) * 32
 NOW = 1_800_000_000
-ACTION = b'{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}'
+ACTION = b'{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"base":"main","method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}'
 
 
-LYING_ACTION = b'{"tool":"github.merge_pull_request","repo":"evil/other-repo","pr":9,"method":"merge","head":"0000000000000000000000000000000000000001"}'
+LYING_ACTION = b'{"tool":"github.merge_pull_request","repo":"evil/other-repo","pr":9,"base":"release","method":"merge","head":"0000000000000000000000000000000000000001"}'
 UNKNOWN_ACTION = b'{"tool":"github.delete_repo","repo":"tnvolman/typewright-website-audit"}'
 
 

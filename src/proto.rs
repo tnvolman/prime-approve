@@ -40,7 +40,7 @@ pub const CLOCK_SKEW_SECS: u64 = 60;
 
 /// The demo's action bytes: a real, already-merged PR, pinned to its head commit so the hash covers
 /// exactly which code would be merged. The agent hashes these exact bytes; the Prime never re-serializes.
-pub const DEMO_ACTION: &[u8] = br#"{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}"#;
+pub const DEMO_ACTION: &[u8] = br#"{"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"base":"main","method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}"#;
 
 /// A request, v2. The agent's own words (`title`, `details`) are shown only as "Agent says". What the
 /// Prime puts in the trusted frame comes from `action`: the exact bytes the agent will run, which the
@@ -171,19 +171,19 @@ pub const GLYPH_SHAPES: [&str; 4] = ["filled circle", "filled square", "ring", "
 /// on the Prime). `decode_request` only checks it is 64 hex chars, and the signature covers it.
 ///
 /// Rule: decode the hex to bytes h[0..32]. The text action code is h[0..4] as 8 uppercase hex
-/// chars ("1594 E5CC"). Glyph i (i = 0..8) comes from byte b = h[4 + i]:
+/// chars ("F961 B2D1"). Glyph i (i = 0..8) comes from byte b = h[4 + i]:
 ///   color id = b & 0b111        (low 3 bits)  -> GLYPH_RGB / GLYPH_COLORS
 ///   shape id = (b >> 3) & 0b11  (bits 3 and 4) -> 0 filled circle, 1 filled square, 2 ring, 3 outlined square
 /// Bits 5..7 of each byte are unused. Bytes 12..32 are not shown.
 ///
 /// Test vector (the main.rs demo action, see `tests::demo_vector`):
-///   action = {"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}
-///   hash   = 1594e5cc61b278e99dba75aad80d8b2dd41e135820630c1e12584dda3b95d9d8
-///   code   = 1594 E5CC
-///   bytes  = 61 b2 78 e9 9d ba 75 aa
-///   ids    = (color, shape) (1,0) (2,2) (0,3) (1,1) (5,3) (2,3) (5,2) (2,1)
-///   glyphs = orange circle, yellow ring, vermillion outlined square, orange square,
-///            blue outlined square, yellow outlined square, blue ring, yellow square
+///   action = {"tool":"github.merge_pull_request","repo":"tnvolman/typewright-website-audit","pr":2,"base":"main","method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}
+///   hash   = f961b2d1333fb6d7cabfca5deae7b688bc23179427874fba41550e7c6a4a101d
+///   code   = F961 B2D1
+///   bytes  = 33 3f b6 d7 ca bf ca 5d
+///   ids    = (color, shape) (3,2) (7,3) (6,2) (7,2) (2,1) (7,3) (2,1) (5,3)
+///   glyphs = bluish green ring, white outlined square, reddish purple ring, white ring,
+///            yellow square, white outlined square, yellow square, blue outlined square
 ///
 /// The pattern helps a person notice a swapped or altered request at a glance. It is not the security
 /// boundary: the agent's signature and hash check in `verify_reply` is.
@@ -203,8 +203,22 @@ struct MergePr {
     tool: String,
     repo: String,
     pr: u64,
+    /// The branch the PR merges INTO. Signed, shown on the Prime ("into main") and checked by the gate,
+    /// so a PR retargeted to another base after approval no longer matches (item 16).
+    base: String,
     method: String,
     head: String,
+}
+
+/// A git branch name for `base`: 1 to 100 of `A-Z a-z 0-9 . _ / -`, not starting with `-` or `/`,
+/// no `..` or `//`, not ending in `/` or `.lock`. Every one of these characters is written as itself in
+/// JSON (and `\u` is refused), so the base on screen is byte-for-byte the raw text.
+pub fn valid_base(b: &str) -> bool {
+    (1..=100).contains(&b.len())
+        && b.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+        && !b.starts_with('-') && !b.starts_with('/')
+        && !b.contains("..") && !b.contains("//")
+        && !b.ends_with('/') && !b.ends_with(".lock")
 }
 
 /// `owner/name`, GitHub's characters only.
@@ -251,17 +265,18 @@ pub fn action_view(action: &str) -> Result<ActionView, &'static str> {
             if !matches!(m.method.as_str(), "merge" | "squash" | "rebase") { return Err("merge method must be merge, squash or rebase"); }
             if m.head.len() != 40 || !m.head.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) { return Err("merge head must be a 40-char lowercase commit SHA"); }
             if m.pr == 0 { return Err("merge pr must be a positive number"); }
-            Ok(ActionView::Known { verb: "Merge", object: format!("PR #{}", m.pr), target: m.repo, detail: format!("{} · head {}", m.method, &m.head[..7]) })
+            if !valid_base(&m.base) { return Err("merge base must be a branch name (1 to 100 of A-Z a-z 0-9 . _ / -)"); }
+            Ok(ActionView::Known { verb: "Merge", object: format!("PR #{} into {}", m.pr, m.base), target: m.repo, detail: format!("{} · head {}", m.method, &m.head[..7]) })
         }
         _ => Ok(ActionView::Unknown { tool: tool.to_string() }),
     }
 }
 
-/// The one-line summary inside the trusted frame, e.g. "Merge → PR #2 → tnvolman/typewright-website-audit".
+/// The one-line summary inside the trusted frame, e.g. "Merge PR #2 into main → tnvolman/typewright-website-audit".
 /// Known tools only; built from the parsed action.
 pub fn summary_line(view: &ActionView) -> Option<String> {
     match view {
-        ActionView::Known { verb, object, target, .. } => Some(format!("{verb} → {object} → {target}")),
+        ActionView::Known { verb, object, target, .. } => Some(format!("{verb} {object} → {target}")),
         ActionView::Unknown { .. } => None,
     }
 }
@@ -551,7 +566,7 @@ pub fn resolve_pairing(saved: &mut Vec<Paired>, pending: Option<PendingPair>, an
 mod tests {
     use super::*;
 
-    const DEMO_HASH: &str = "1594e5cc61b278e99dba75aad80d8b2dd41e135820630c1e12584dda3b95d9d8";
+    const DEMO_HASH: &str = "f961b2d1333fb6d7cabfca5deae7b688bc23179427874fba41550e7c6a4a101d";
 
     fn named(hash: &str) -> Vec<String> {
         glyphs(hash).into_iter().map(|(c, s)| {
@@ -564,11 +579,11 @@ mod tests {
     fn demo_vector() {
         let h = hex::encode(Sha256::digest(DEMO_ACTION));
         assert_eq!(h, DEMO_HASH);
-        assert_eq!(action_code(&h), "1594 E5CC");
-        assert_eq!(glyphs(&h), vec![(1, 0), (2, 2), (0, 3), (1, 1), (5, 3), (2, 3), (5, 2), (2, 1)]);
+        assert_eq!(action_code(&h), "F961 B2D1");
+        assert_eq!(glyphs(&h), vec![(3, 2), (7, 3), (6, 2), (7, 2), (2, 1), (7, 3), (2, 1), (5, 3)]);
         assert_eq!(named(&h), [
-            "orange circle", "yellow ring", "vermillion outlined square", "orange square",
-            "blue outlined square", "yellow outlined square", "blue ring", "yellow square",
+            "bluish green ring", "white outlined square", "reddish purple ring", "white ring",
+            "yellow square", "white outlined square", "yellow square", "blue outlined square",
         ]);
         // Upper-case hex gives the same glyphs.
         assert_eq!(glyphs(&h.to_uppercase()), glyphs(&h));
@@ -598,8 +613,8 @@ mod tests {
         assert!(qr.len() <= 650, "demo request is {} bytes", qr.len());
         let agents = [Agent::new("Cos (demo agent)", sk.verifying_key())];
         let (r, view, _) = decode_request(&qr, &agents).expect("valid");
-        assert_eq!(view, ActionView::Known { verb: "Merge", object: "PR #2".into(), target: "tnvolman/typewright-website-audit".into(), detail: "squash · head 33393c6".into() });
-        assert_eq!(summary_line(&view).as_deref(), Some("Merge → PR #2 → tnvolman/typewright-website-audit"));
+        assert_eq!(view, ActionView::Known { verb: "Merge", object: "PR #2 into main".into(), target: "tnvolman/typewright-website-audit".into(), detail: "squash · head 33393c6".into() });
+        assert_eq!(summary_line(&view).as_deref(), Some("Merge PR #2 into main → tnvolman/typewright-website-audit"));
         assert!(is_elevated(&view));
         assert_eq!(r.hash(), DEMO_HASH, "the Prime computes the hash from the action bytes");
     }
@@ -611,9 +626,9 @@ mod tests {
         // The agent says "Merge PR #2" but the action merges PR #9 somewhere else.
         req.title = "Merge PR #2 into main".into();
         req.details = "Merge -> PR #2 -> tnvolman/typewright-website-audit".into();
-        req.action = r#"{"tool":"github.merge_pull_request","repo":"evil/other-repo","pr":9,"method":"merge","head":"0000000000000000000000000000000000000001"}"#.into();
+        req.action = r#"{"tool":"github.merge_pull_request","repo":"evil/other-repo","pr":9,"base":"release","method":"merge","head":"0000000000000000000000000000000000000001"}"#.into();
         let (r, view, _) = decode_request(&encode_request(&req, &sk), &agents).unwrap();
-        assert_eq!(summary_line(&view).as_deref(), Some("Merge → PR #9 → evil/other-repo"));
+        assert_eq!(summary_line(&view).as_deref(), Some("Merge PR #9 into release → evil/other-repo"));
         assert_ne!(r.hash(), DEMO_HASH);
         assert_eq!(r.hash(), hex::encode(Sha256::digest(req.action.as_bytes())));
         // A reply binds the hash of what was shown, not of anything the agent claimed.
@@ -652,17 +667,32 @@ mod tests {
             "{\"tool\":\"x\",\"t\":\"caf\u{e9}\"}".into(),
             "{\"tool\":\"x\",\"t\":\"a\tb\"}".into(),
             // Known tool with bad fields: each must reject, never fall back to a friendlier view.
-            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash","head":"{head}","delete_branch":true}}"#),
-            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","repo":"c/d","pr":2,"method":"squash","head":"{head}"}}"#),
-            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash"}"#.into(),
-            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":"2","method":"squash","head":"{head}"}}"#),
-            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2.5,"method":"squash","head":"{head}"}}"#),
-            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":0,"method":"squash","head":"{head}"}}"#),
-            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"force","head":"{head}"}}"#),
-            format!(r#"{{"tool":"github.merge_pull_request","repo":"a b/c","pr":2,"method":"squash","head":"{head}"}}"#),
-            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b/c","pr":2,"method":"squash","head":"{head}"}}"#),
-            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash","head":"33393C61B3E595BFB83BB9B909E280B2F40F0976"}"#.into(),
-            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash","head":"33393c6"}"#.into(),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main","method":"squash","head":"{head}","delete_branch":true}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","repo":"c/d","pr":2,"base":"main","method":"squash","head":"{head}"}}"#),
+            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main","method":"squash"}"#.into(),
+            // Item 16: base is required and must be a plain branch name.
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main","base":"release","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":7,"method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"ma in","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"-main","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"/main","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main/","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main.lock","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"a..b","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"a//b","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"m\u0430in","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main~1","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"{}","method":"squash","head":"{head}"}}"#, "b".repeat(101)),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":"2","base":"main","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2.5,"base":"main","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":0,"base":"main","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main","method":"force","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a b/c","pr":2,"base":"main","method":"squash","head":"{head}"}}"#),
+            format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b/c","pr":2,"base":"main","method":"squash","head":"{head}"}}"#),
+            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main","method":"squash","head":"33393C61B3E595BFB83BB9B909E280B2F40F0976"}"#.into(),
+            r#"{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"main","method":"squash","head":"33393c6"}"#.into(),
         ];
         for a in bad {
             let mut r = req.clone();
@@ -672,16 +702,32 @@ mod tests {
         }
         // Pretty-printed JSON with newlines is fine; the hash covers the exact bytes.
         let mut r = req.clone();
-        r.action = format!("{{\n \"tool\": \"github.merge_pull_request\",\n \"repo\": \"a/b\", \"pr\": 2,\n \"method\": \"rebase\", \"head\": \"{head}\"\n}}");
+        r.action = format!("{{\n \"tool\": \"github.merge_pull_request\",\n \"repo\": \"a/b\", \"pr\": 2, \"base\": \"main\",\n \"method\": \"rebase\", \"head\": \"{head}\"\n}}");
         let (r2, v, _) = decode_request(&encode_request(&r, &sk), &agents).unwrap();
-        assert_eq!(summary_line(&v).as_deref(), Some("Merge → PR #2 → a/b"));
+        assert_eq!(summary_line(&v).as_deref(), Some("Merge PR #2 into main → a/b"));
         assert_eq!(r2.hash(), hex::encode(Sha256::digest(r.action.as_bytes())));
+    }
+
+    /// Item 16: the base branch is part of the signed action, shown on the Prime, and changes the hash.
+    #[test]
+    fn base_branch_is_shown_and_bound() {
+        let head = "33393c61b3e595bfb83bb9b909e280b2f40f0976";
+        let act = |base: &str| format!(r#"{{"tool":"github.merge_pull_request","repo":"a/b","pr":2,"base":"{base}","method":"squash","head":"{head}"}}"#);
+        let main = action_view(&act("main")).unwrap();
+        let rel = action_view(&act("release/2026.10")).unwrap();
+        assert_eq!(summary_line(&main).as_deref(), Some("Merge PR #2 into main → a/b"));
+        assert_eq!(summary_line(&rel).as_deref(), Some("Merge PR #2 into release/2026.10 → a/b"), "a non-default base is just as visible");
+        assert_ne!(Sha256::digest(act("main")), Sha256::digest(act("release/2026.10")), "approving one base never covers another");
+        for ok in ["main", "release/1.2", "feature_x-y", "v1.0.x", "a", &"b".repeat(100)] { assert!(valid_base(ok), "{ok:?}"); }
+        for bad in ["", "-x", "/x", "x/", "x.lock", "a..b", "a//b", "a b", "a~b", "a^b", "a:b", "a@{1}", "a\\b", "caf\u{e9}", &"b".repeat(101)] {
+            assert!(!valid_base(bad), "{bad:?}");
+        }
     }
 
     #[test]
     fn unicode_escapes_cannot_fake_a_tool_name() {
         // "github.merge_pull_requeѕt" with a Cyrillic ѕ written as \u0455: valid JSON, ASCII on the wire.
-        let lookalike = r#"{"tool":"github.merge_pull_reque\u0455t","repo":"a/b","pr":2,"method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}"#;
+        let lookalike = r#"{"tool":"github.merge_pull_reque\u0455t","repo":"a/b","pr":2,"base":"main","method":"squash","head":"33393c61b3e595bfb83bb9b909e280b2f40f0976"}"#;
         assert!(action_view(lookalike).is_err());
         // An ASCII escape would show "github.delete_repo" for raw text that reads "\u0067ithub...".
         assert!(action_view(r#"{"tool":"\u0067ithub.delete_repo"}"#).is_err());
@@ -776,7 +822,7 @@ mod tests {
         println!("vector app_pk={} id={} kid={} hash={} reply={qr}", hex::encode(app.verifying_key().as_bytes()), req.id, req.kid, req.hash());
         assert_eq!(qr, REPLY_VECTOR);
     }
-    const REPLY_VECTOR: &str = "PA1:W50H00PE4XS8-.CFPDUOQ65F+%N1KSUHI911B:D891NZDPID5VRFZKBHEDAB%W1J9QPKTOSI$6F+8KX.AO5MEC3IQG$A9QIB%UN/R70-F*XC7+DC PAW7";
+    const REPLY_VECTOR: &str = "PA1:W50H00PE4XS8-.CFPDUOQEHIDYT2BN5 FYCK3H043P$PR9VC.CVR851BUOKMF P-$F0J0FFB1WVDOMVACB.EN29N2FM 1KTTH0DBBIF7T8DK*MIQV9O4V";
 
     #[test]
     fn compact_reply_tamper_fails() {

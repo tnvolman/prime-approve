@@ -18,6 +18,8 @@ Also fix README line 225: GitHub can tie a commit status to an app and block a s
 Until all five are true, don't describe main as Prime-protected anywhere public.
 ```
 
+Note (item 16): the check's context is now named per base branch, `prime-approve/<base>`, so "the prime-approve check" on main is `prime-approve/main`.
+
 tinkabot is the agent that builds this repo.
 
 Status on 2026-10-17: none of the five are met. The agent works through the owner's account with admin rights, the gate runs on the agent's machine with a personal token, and every approval so far came from the simulator, which the agent can drive (`tools/flow.sh`).

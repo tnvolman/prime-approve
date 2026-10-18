@@ -31,7 +31,7 @@ const DEMO_AGENT: &str = "Cos (demo agent)";
 #[cfg(feature = "demo")]
 const DEMO_TITLE: &str = "Merge PR #2 into main";
 // A real, already-merged PR (tnvolman/typewright-website-audit #2), pinned to its head commit.
-// Kept short so the demo request QR stays <= 600 bytes: dense QRs are hard for a real camera.
+// Kept short so the demo request QR stays near 640 bytes (cap 800): dense QRs are hard for a real camera.
 #[cfg(feature = "demo")]
 const DEMO_DETAILS: &str = "Squash merge at 33393c6.\n10 files changed.";
 // Security demo buttons (tampered, replay, hidden text) need a demo build AND a debug build.

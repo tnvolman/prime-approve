@@ -12,11 +12,15 @@ For a reply it:
   2. refuses anything but a known tool (github.merge_pull_request), even when approved,
   3. verifies the reply against its pinned Prime key over the request id, agent kid and that hash,
      and checks expiry,
-  4. fetches the PR and requires the same repo, number, open state and head SHA as the action,
+  4. fetches the PR and requires the same repo, number, open state, head SHA and base branch as the action
+     (a PR retargeted to another base after approval is refused),
   5. marks the request used in its own store (single use), then
-  6. --mode status: posts commit status `prime-approve` (success on approve, failure on deny) on that SHA;
-     --mode merge: PUT /pulls/{n}/merge with sha=<approved head>, so GitHub itself refuses (409) if the
-     head moved. A deny merges nothing.
+  6. --mode status: posts commit status `prime-approve/<base>` (e.g. `prime-approve/main`; success on
+     approve, failure on deny) on that SHA, so a check required on main is only met by an approval for main;
+     --mode merge: re-fetches the PR and re-checks base and head right before
+     PUT /pulls/{n}/merge with sha=<approved head>, so GitHub itself refuses (409) if the head moved.
+     GitHub's merge call can't check the base, so a retarget in the moment between the re-check and the
+     merge is not caught. A deny merges nothing.
 Exit codes: 0 done (approved and carried out), 1 denied, 2 refused or error. The token is never printed.
 """
 from __future__ import annotations
@@ -34,6 +38,11 @@ from .protocol import ProtocolError, action_code, decode_request, fingerprint, v
 
 DEFAULT_API = "https://api.github.com"
 CONTEXT = "prime-approve"
+
+
+def context_for(base: str) -> str:
+    """Status context, one per base branch: `prime-approve/main`. Require this exact context on that branch."""
+    return f"{CONTEXT}/{base}"
 
 
 def gate_home() -> Path:
@@ -146,12 +155,13 @@ def run_gate(request_qr: str, reply_qr: str, gh: GitHub, *, mode: str = "status"
     if now > body["exp"]:
         return Result(2, "REFUSED (request expired)")
     used = _used(home, body["id"]).exists()
-    repo, pr, head = a["repo"], a["pr"], a["head"]
+    repo, pr, head, base = a["repo"], a["pr"], a["head"], a["base"]
     status, p = gh.call("GET", f"/repos/{repo}/pulls/{pr}")
     if status != 200:
         return Result(2, f"REFUSED (GitHub returned {status} for {repo} PR #{pr}; nothing posted)")
     got_repo = (p.get("base") or {}).get("repo", {}).get("full_name", "")
     got_head = (p.get("head") or {}).get("sha", "")
+    got_base = (p.get("base") or {}).get("ref", "")
     if got_repo.lower() != repo.lower() or p.get("number") != pr:
         return Result(2, f"REFUSED (wrong repo or PR: GitHub says {got_repo} #{p.get('number')}, action says {repo} #{pr}; nothing posted)")
     if p.get("state") != "open" or p.get("merged"):
@@ -159,22 +169,32 @@ def run_gate(request_qr: str, reply_qr: str, gh: GitHub, *, mode: str = "status"
     if got_head != head and not test_skip_head_precheck:
         note = " This reply was also already used." if used else ""
         return Result(2, f"REFUSED (head moved: PR head is {got_head[:12]}, approved head is {head[:12]}; nothing posted).{note}")
+    if got_base != base:
+        note = " This reply was also already used." if used else ""
+        return Result(2, f"REFUSED (base moved: PR now targets {got_base!r}, approved base is {base!r}; nothing posted).{note}")
     if used or not _consume(home, body["id"], "approved" if reply.approved else "denied"):
         return Result(2, "REFUSED (this request was already answered; replies are single-use)")
     if mode == "merge":
         if not reply.approved:
             return Result(1, f"DENIED{f'({reply.reason})' if reply.reason else ''} on Prime: nothing merged")
+        # Last look right before merging: GitHub's merge call takes the head sha but not the base,
+        # so the base is checked here (a retarget after this call and before the merge isn't caught).
+        st, p2 = gh.call("GET", f"/repos/{repo}/pulls/{pr}")
+        b2 = (p2.get("base") or {}).get("ref", "")
+        if st != 200 or b2 != base:
+            return Result(2, f"REFUSED (base moved right before the merge: PR now targets {b2!r}, approved base is {base!r}; nothing merged)")
         st, m = gh.call("PUT", f"/repos/{repo}/pulls/{pr}/merge", {"sha": head, "merge_method": a["method"]})
         if st == 200 and m.get("merged"):
-            return Result(0, f"MERGED {repo} PR #{pr} at {head[:12]} ({a['method']}), code {code}", m)
+            return Result(0, f"MERGED {repo} PR #{pr} into {base} at {head[:12]} ({a['method']}), code {code}", m)
         return Result(2, f"REFUSED by GitHub ({st}: {m.get('message', 'no message')}); nothing merged", {"status": st, **m})
     state = "success" if reply.approved else "failure"
     desc = f"Approved on Prime · code {code}" if reply.approved else \
         f"Denied on Prime{f' ({reply.reason})' if reply.reason else ''} · code {code}"
-    st, s = gh.call("POST", f"/repos/{repo}/statuses/{head}", {"state": state, "context": CONTEXT, "description": desc})
+    ctx = context_for(base)
+    st, s = gh.call("POST", f"/repos/{repo}/statuses/{head}", {"state": state, "context": ctx, "description": desc})
     if st != 201:
         return Result(2, f"ERROR (GitHub returned {st} posting the status: {s.get('message', '')})")
-    return Result(0 if reply.approved else 1, f"POSTED {CONTEXT}={state} on {repo}@{head} ({desc})", s)
+    return Result(0 if reply.approved else 1, f"POSTED {ctx}={state} on {repo}@{head} ({desc})", s)
 
 
 def _consume(home: Path, req_id: str, outcome: str) -> bool:
