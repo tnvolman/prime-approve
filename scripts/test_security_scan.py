@@ -308,6 +308,152 @@ class DependencyTests(unittest.TestCase):
             self.assertIn("package=smallvec", result.stdout)
             self.assertIn("version=1.6.0", result.stdout)
             self.assertIn("RUSTSEC-2021-0003", result.stdout)
+            self.assertIn("kind=vulnerability", result.stdout)
+
+    def test_cargo_audit_warnings_are_findings_labelled_by_kind(self) -> None:
+        import tempfile
+
+        report = {
+            "vulnerabilities": {
+                "found": True,
+                "count": 1,
+                "list": [
+                    {
+                        "advisory": {
+                            "id": "RUSTSEC-2021-0003",
+                            "package": "smallvec",
+                            "aliases": ["GHSA-43w2-9j62-hq99"],
+                        },
+                        "package": {"name": "smallvec", "version": "1.6.0"},
+                    }
+                ],
+            },
+            "warnings": {
+                "unmaintained": [
+                    {
+                        "kind": "unmaintained",
+                        "package": {"name": "paste", "version": "1.0.15"},
+                        "advisory": {"id": "RUSTSEC-2024-0436", "package": "paste", "aliases": []},
+                    }
+                ],
+                "unsound": [
+                    {
+                        "kind": "unsound",
+                        "package": {"name": "event-listener", "version": "5.4.1"},
+                        "advisory": {"id": "RUSTSEC-2026-0221", "package": "event-listener"},
+                    }
+                ],
+                "yanked": [
+                    {
+                        "kind": "yanked",
+                        "package": {"name": "yanked-demo", "version": "0.1.0"},
+                        "advisory": None,
+                    }
+                ],
+            },
+        }
+        osv_report = {
+            "results": [
+                {
+                    "packages": [
+                        {
+                            "package": {"name": "paste", "version": "1.0.15"},
+                            "vulnerabilities": [
+                                {
+                                    "id": "RUSTSEC-2024-0436",
+                                    "affected": [
+                                        {"database_specific": {"informational": "unmaintained"}}
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "package": {"name": "smallvec", "version": "1.6.0"},
+                            "vulnerabilities": [
+                                {
+                                    "id": "RUSTSEC-2021-0003",
+                                    "aliases": ["GHSA-43w2-9j62-hq99"],
+                                    "affected": [
+                                        {"database_specific": {"informational": None}}
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "package": {"name": "event-listener", "version": "5.4.1"},
+                            "vulnerabilities": [
+                                {
+                                    "id": "RUSTSEC-2026-0221",
+                                    "affected": [{"database_specific": {"informational": "unsound"}}],
+                                }
+                            ],
+                        },
+                    ]
+                }
+            ]
+        }
+        lock_text = "\n".join(
+            [
+                'name = "paste"',
+                'version = "1.0.15"',
+                'name = "smallvec"',
+                'version = "1.6.0"',
+                'name = "event-listener"',
+                'version = "5.4.1"',
+                'name = "yanked-demo"',
+                'version = "0.1.0"',
+            ]
+        )
+        cargo_findings = scan._dep_findings_from_cargo_audit(report, "Cargo.lock", lock_text)
+        osv_findings = scan._dep_findings_from_osv(osv_report, "Cargo.lock", lock_text)[0]
+        cargo_kinds = {(item.rule, item.package, item.version, item.kind) for item in cargo_findings}
+        osv_kinds = {(item.rule, item.package, item.version, item.kind) for item in osv_findings}
+        self.assertIn(("RUSTSEC-2021-0003", "smallvec", "1.6.0", "vulnerability"), cargo_kinds)
+        self.assertIn(("RUSTSEC-2024-0436", "paste", "1.0.15", "unmaintained"), cargo_kinds)
+        self.assertIn(("RUSTSEC-2026-0221", "event-listener", "5.4.1", "unsound"), cargo_kinds)
+        self.assertIn(("yanked", "yanked-demo", "0.1.0", "yanked"), cargo_kinds)
+        self.assertTrue(osv_kinds <= cargo_kinds)
+        self.assertEqual(
+            {item.kind for item in osv_findings},
+            {"vulnerability", "unmaintained", "unsound"},
+        )
+
+        warnings_only = {
+            "vulnerabilities": {"found": False, "count": 0, "list": []},
+            "warnings": report["warnings"],
+        }
+        with tempfile.TemporaryDirectory(prefix="scan-audit-warn-") as tmp:
+            repo = Path(tmp)
+            env = init_repo(repo)
+            (repo / "Cargo.lock").write_text(lock_text + "\n", encoding="utf-8")
+            (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+            commit_all(repo, env, "lockfile")
+            stub = Path(tmp) / "cargo-audit"
+            import json
+
+            stub.write_text(
+                "#!/bin/sh\ncat <<'JSON'\n%s\nJSON\nexit 0\n" % json.dumps(warnings_only),
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            result = run_scan(
+                repo,
+                "--secrets",
+                "builtin",
+                "--timeout",
+                "30",
+                env={"SECURITY_SCAN_CARGO_AUDIT": str(stub)},
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            report_states = states(result.stdout)
+            self.assertEqual(report_states["deps-rust:Cargo.lock"], scan.FINDINGS)
+            self.assertNotEqual(report_states["deps-rust:Cargo.lock"], scan.CLEAN)
+            self.assertIn("kind=unmaintained", result.stdout)
+            self.assertIn("kind=unsound", result.stdout)
+            self.assertIn("kind=yanked", result.stdout)
+            self.assertIn("rule=RUSTSEC-2024-0436", result.stdout)
+            self.assertIn("package=yanked-demo", result.stdout)
+            self.assertNotIn("kind=vulnerability", result.stdout)
 
 
 class IncompleteTests(unittest.TestCase):
@@ -341,6 +487,50 @@ class IncompleteTests(unittest.TestCase):
             self.assertIn("not found", result.stdout)
             self.assertEqual(report_states["secrets-worktree"], scan.CLEAN)
             self.assertEqual(report_states["secrets-history"], scan.CLEAN)
+
+    def test_trufflehog_result_without_secret_is_incomplete(self) -> None:
+        import tempfile
+
+        payload = (
+            '{"DetectorName":"GitHub","SourceMetadata":{"Data":{"Filesystem":'
+            '{"file":"notes.txt","line":2}}}}\n'
+        )
+        with self.assertRaises(ValueError):
+            scan._trufflehog_findings(payload.encode("utf-8"), Path("/tmp"), "working-tree")
+        token = fake_github_pat()
+        present = payload.strip()[:-1] + ',"Raw":"' + token + '"}\n'
+        found = scan._trufflehog_findings(present.encode("utf-8"), Path("/tmp"), "working-tree")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].fingerprint, scan.fingerprint(token))
+        self.assertNotIn(token, found[0].render())
+        with tempfile.TemporaryDirectory(prefix="scan-th-") as tmp:
+            repo = Path(tmp)
+            env = init_repo(repo)
+            (repo / "notes.txt").write_text("nothing here\n", encoding="utf-8")
+            commit_all(repo, env, "notes")
+            stub = Path(tmp) / "trufflehog"
+            stub.write_text(
+                "#!/bin/sh\nprintf '%s' '" + payload.replace("'", "'\\''") + "'\nexit 0\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            result = run_scan(
+                repo,
+                "--secrets",
+                "trufflehog",
+                "--timeout",
+                "30",
+                env={"SECURITY_SCAN_TRUFFLEHOG": str(stub)},
+            )
+            self.assertEqual(result.returncode, 2, result.stdout)
+            report_states = states(result.stdout)
+            self.assertEqual(report_states["secrets-worktree"], scan.INCOMPLETE)
+            self.assertEqual(report_states["secrets-history"], scan.INCOMPLETE)
+            self.assertEqual(report_states["overall"], scan.INCOMPLETE)
+            self.assertIn("no secret field", result.stdout)
+            for line in result.stdout.splitlines():
+                if line.startswith("secrets-"):
+                    self.assertNotIn(scan.CLEAN, line)
 
     def test_missing_secret_tool_is_incomplete(self) -> None:
         import tempfile

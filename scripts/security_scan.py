@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Report-only security scan for Prime Approve.
 
-Scans tracked text files and the full git history for secrets, and audits
-the Rust lockfiles and the Python dependencies in agent/. Prints a report
-and does not change the tree, the history, or git settings.
+Scans tracked text files and commits on local branches and tags for secrets,
+and audits the Rust lockfiles and the Python dependencies in agent/. Prints a
+report and does not change the tree, the history, or git settings. Without a
+lockfile, pip-audit installs dependencies, and that install runs package code.
 
 Exit codes:
   0  every check is CLEAN
@@ -51,10 +52,13 @@ class Finding:
     package: str = ""
     version: str = ""
     aliases: str = ""
+    kind: str = ""
 
     def render(self) -> str:
         if self.package:
             parts = [f"rule={self.rule}", f"file={self.file}", f"package={self.package}", f"version={self.version}"]
+            if self.kind:
+                parts.append(f"kind={self.kind}")
             if self.aliases:
                 parts.append(f"aliases={self.aliases}")
             if self.line:
@@ -450,7 +454,7 @@ def scan_gitleaks(root: Path, binary: Path, timeout: int, history: bool, tracked
         shutil.rmtree(report_dir, ignore_errors=True)
 
 
-def _trufflehog_findings(blob: bytes, root: Path, commit_override: str | None) -> list[Finding]:
+def _trufflehog_rows(blob: bytes) -> list[dict]:
     text = blob.decode("utf-8", "replace").strip()
     if not text:
         return []
@@ -459,20 +463,36 @@ def _trufflehog_findings(blob: bytes, root: Path, commit_override: str | None) -
         parsed = json.loads(text)
         if not isinstance(parsed, list):
             raise ValueError("trufflehog output was not a list")
-        rows = [row for row in parsed if isinstance(row, dict)]
-    else:
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            if isinstance(row, dict):
-                rows.append(row)
+        for row in parsed:
+            if not isinstance(row, dict):
+                raise ValueError("trufflehog report entry was not an object")
+            rows.append(row)
+        return rows
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError("trufflehog report entry was not an object")
+        rows.append(row)
+    return rows
+
+
+def _trufflehog_secret(row: dict) -> str:
+    secret = row.get("Raw")
+    if not isinstance(secret, str) or not secret:
+        secret = row.get("RawV2")
+    if not isinstance(secret, str) or not secret:
+        raise ValueError("trufflehog report entry had no secret field to fingerprint")
+    return secret
+
+
+def _trufflehog_findings(blob: bytes, root: Path, commit_override: str | None) -> list[Finding]:
+    rows = _trufflehog_rows(blob)
     findings: list[Finding] = []
     for row in rows:
-        secret = row.get("Raw") or row.get("RawV2") or ""
-        if not isinstance(secret, str) or not secret:
-            continue
+        secret = _trufflehog_secret(row)
         meta = ((row.get("SourceMetadata") or {}).get("Data") or {}) if isinstance(row.get("SourceMetadata"), dict) else {}
         file_name = ""
         line_no = 0
@@ -505,8 +525,10 @@ def scan_trufflehog(root: Path, binary: Path, timeout: int, history: bool, track
         return Check(name, INCOMPLETE, "trufflehog", reason="trufflehog failed to start")
     try:
         findings = _trufflehog_findings(stdout, root, "working-tree" if not history else None)
-    except (json.JSONDecodeError, ValueError, TypeError):
+    except json.JSONDecodeError:
         return Check(name, INCOMPLETE, "trufflehog", reason="trufflehog output was not valid JSON")
+    except (ValueError, TypeError) as exc:
+        return Check(name, INCOMPLETE, "trufflehog", reason=scrub(str(exc))[:200])
     if not history and tracked is not None:
         findings = [item for item in findings if item.file in tracked and ".git/" not in f"/{item.file}"]
     if findings:
@@ -562,6 +584,51 @@ def scan_secrets(root: Path, timeout: int, mode: str) -> list[Check]:
     return [Check("secrets-worktree", INCOMPLETE, mode, reason=f"unknown secret scanner {mode}")]
 
 
+_RUST_WARNING_KINDS = ("unmaintained", "unsound", "yanked", "notice")
+
+
+def _osv_kind(vuln: dict) -> str:
+    """Kind shared with cargo audit: vulnerability, or an informational warning kind."""
+    values = []
+    specific = vuln.get("database_specific")
+    if isinstance(specific, dict):
+        values.append(specific.get("informational"))
+    for affected in vuln.get("affected") or []:
+        if not isinstance(affected, dict):
+            continue
+        nested = affected.get("database_specific")
+        if isinstance(nested, dict):
+            values.append(nested.get("informational"))
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        kind = value.strip().lower()
+        if kind in _RUST_WARNING_KINDS:
+            return kind
+    return "vulnerability"
+
+
+def _rust_finding(
+    rule: str,
+    lock_rel: str,
+    lock_text: str,
+    name: str,
+    version: str,
+    aliases: str,
+    kind: str,
+) -> Finding:
+    return Finding(
+        rule=rule,
+        file=lock_rel,
+        commit="working-tree",
+        line=_lock_line(lock_text, name, version),
+        package=name,
+        version=version,
+        aliases=aliases,
+        kind=kind,
+    )
+
+
 def _lock_line(text: str, package: str, version: str) -> int:
     lines = text.splitlines()
     name_line = f'name = "{package}"'
@@ -605,17 +672,9 @@ def _dep_findings_from_osv(data, lock_rel: str, lock_text: str) -> tuple[list[Fi
                 aliases = vuln.get("aliases") or []
                 alias_text = ",".join(str(alias) for alias in aliases if alias and alias != rule)
                 findings.append(
-                    Finding(
-                        rule=rule,
-                        file=lock_rel,
-                        commit="working-tree",
-                        line=_lock_line(lock_text, name, version),
-                        package=name,
-                        version=version,
-                        aliases=alias_text,
-                    )
+                    _rust_finding(rule, lock_rel, lock_text, name, version, alias_text, _osv_kind(vuln))
                 )
-    findings.sort(key=lambda item: (item.file, item.package, item.version, item.rule))
+    findings.sort(key=lambda item: (item.file, item.package, item.version, item.rule, item.kind))
     return findings, packages
 
 
@@ -673,39 +732,61 @@ def _cargo_audit_command() -> list[str] | object | None:
     return [str(cargo), "audit"]
 
 
+def _cargo_audit_entry(item: dict, kind: str, lock_rel: str, lock_text: str) -> Finding:
+    if not isinstance(item, dict):
+        raise ValueError("cargo audit report entry was not an object")
+    advisory = item.get("advisory") or {}
+    if advisory is None:
+        advisory = {}
+    if not isinstance(advisory, dict):
+        raise ValueError("cargo audit advisory was not an object")
+    package = item.get("package") or {}
+    if not isinstance(package, dict):
+        raise ValueError("cargo audit package was not an object")
+    rule = str(advisory.get("id") or kind)
+    name = str(package.get("name") or advisory.get("package") or "")
+    version = str(package.get("version") or "")
+    aliases = advisory.get("aliases") or []
+    if not isinstance(aliases, list):
+        aliases = []
+    alias_text = ",".join(str(alias) for alias in aliases if alias and alias != rule)
+    return _rust_finding(rule, lock_rel, lock_text, name, version, alias_text, kind)
+
+
 def _dep_findings_from_cargo_audit(data, lock_rel: str, lock_text: str) -> list[Finding]:
     if not isinstance(data, dict):
         raise ValueError("cargo audit output was not an object")
     vulns = data.get("vulnerabilities") or {}
+    if not isinstance(vulns, dict):
+        raise ValueError("cargo audit vulnerabilities were not an object")
     items = vulns.get("list") or []
+    if not isinstance(items, list):
+        raise ValueError("cargo audit vulnerabilities were not a list")
+    warnings = data.get("warnings") or {}
+    if not isinstance(warnings, dict):
+        raise ValueError("cargo audit warnings were not an object")
     findings: list[Finding] = []
-    seen: set[tuple[str, str, str]] = set()
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        advisory = item.get("advisory") or {}
-        package = item.get("package") or {}
-        rule = str(advisory.get("id") or "RUSTSEC")
-        name = str(package.get("name") or advisory.get("package") or "")
-        version = str(package.get("version") or "")
-        key = (rule, name, version)
+    seen: set[tuple[str, str, str, str]] = set()
+
+    def add(item: dict, kind: str) -> None:
+        finding = _cargo_audit_entry(item, kind, lock_rel, lock_text)
+        key = (finding.rule, finding.package, finding.version, finding.kind)
         if key in seen:
-            continue
+            return
         seen.add(key)
-        aliases = advisory.get("aliases") or []
-        alias_text = ",".join(str(alias) for alias in aliases if alias and alias != rule)
-        findings.append(
-            Finding(
-                rule=rule,
-                file=lock_rel,
-                commit="working-tree",
-                line=_lock_line(lock_text, name, version),
-                package=name,
-                version=version,
-                aliases=alias_text,
-            )
-        )
-    findings.sort(key=lambda item: (item.package, item.version, item.rule))
+        findings.append(finding)
+
+    for item in items:
+        add(item, "vulnerability")
+    kinds = [kind for kind in _RUST_WARNING_KINDS if kind in warnings]
+    kinds.extend(sorted(kind for kind in warnings if kind not in _RUST_WARNING_KINDS))
+    for kind in kinds:
+        entries = warnings[kind]
+        if not isinstance(entries, list):
+            raise ValueError("cargo audit warnings were not readable")
+        for item in entries:
+            add(item, str(kind))
+    findings.sort(key=lambda item: (item.package, item.version, item.rule, item.kind))
     return findings
 
 
