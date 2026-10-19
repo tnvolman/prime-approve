@@ -50,14 +50,13 @@ When the Prime shows a request inside the bordered panel and the person slides t
 | Agent approves its own request (drives the simulator, or a Developer Mode dev unit plugged into its machine) | Open | Approvals must come from a Prime the agent can't drive; until then, simulator approvals are demo evidence only |
 | Agent's GitHub credential has admin rights (today it works through the owner's account) | Open | Give the agent its own non-admin credential, keep the owner's gh login off its machine, and turn on "Do not allow bypassing the above settings" |
 | Approver doesn't compare codes carefully | Partly mitigated | Action code plus shape row; clear-signing reduces reliance on comparison |
-| Unattended unlocked Prime | Open | Short expiry; ask Foundation about a KeyOS-drawn confirmation for high-impact approvals |
+| Unattended unlocked Prime | Open | Short expiry. A KeyOS-drawn confirmation for high-impact approvals is unconfirmed by Foundation (asked 2026-10-17) |
 | Lost Prime | Open | Key epoch in HKDF info ("app key v1" to v2) and unpairing at the agent or gate |
 | Key swapped during pairing | Blocked | Pairing code from both keys and a fresh nonce the Prime picks for each pairing (v0.7), compared on both screens; saved only on "Codes match"; agent pins the Prime's key after its user confirms. The nonce makes every code single-use; it does not replace the comparison |
 | Simulator approval mistaken for a real Prime's on GitHub | Mitigated | `pa gate-trust --simulator` marks the pinned key; the gate's status then says "Approved in simulator". Default is not simulator, so marking it is up to whoever pins the key |
 | Unpaired agent keeps access | Blocked | Unpairing is saved and survives a restart; that agent's requests are refused |
-| Fork reuses our app-id | Documented | The app key derives from app-id plus master seed; forks must change the app-id (see "Another app derives the same app key" below) |
-| Another app derives the same app key (GetAppSeed is not bound to the publisher key, per Foundation, 2026-10-19) | Open | Ask Foundation what the derivation binds to (app ID, name, or install); until answered, assume an app with the same identity could sign as Prime Approve |
-| Pairing lost after a KeyOS update | Mitigated | Foundation says GetAppSeed is designed to stay stable across KeyOS updates; confirm on hardware |
+| Pairing lost after a KeyOS update | Mitigated | Foundation says GetAppSeed is designed to stay stable across KeyOS updates (2026-10-19); confirm on hardware |
+| Another app derives our app key (same app-id, different publisher) | Open | The app key derives from app-id plus master seed, and Foundation confirmed (2026-10-19) that GetAppSeed does not bind the publisher key. Whether KeyOS lets a second publisher install an app with our app-id is unconfirmed; until it is, assume such an app could sign approvals as Prime Approve. Forks must change the app-id, and users should install only builds signed by our publisher key |
 
 ## Rules for anyone integrating
 
@@ -67,8 +66,14 @@ When the Prime shows a request inside the bordered panel and the person slides t
 4. Don't let the agent hold the credential it is asking approval to use. Run the gate on a different machine or OS account (or a CI job the agent can't modify), with its own state dir, pinned keys and token.
 5. Carry out known tools only. An approval of an action the Prime showed as "Unrecognized" is a person reading raw JSON, not something an executor should act on automatically.
 
+## Answered by Foundation (2026-10-19)
+
+- Security review checklist: none to share. KeyOS permissions limit which APIs an app can use but don't replace reviewing the app's own signing logic and threat model.
+- GetAppSeed: designed to stay stable across KeyOS updates; does not bind the publisher key.
+- QuantumLink: SDK apps are expected to use it over Bluetooth and/or USB starting with KeyOS 1.5.0, as a path beside QR codes.
+
 ## Open questions for Foundation
 
-- Will the GetAppSeed derivation stay stable across KeyOS updates, and will it bind the publisher key?
-- Is there a planned path for third-party apps to use QuantumLink data, or a KeyOS-drawn confirmation prompt?
+- Can an app from a different publisher install with an app-id already in use, and what exactly does GetAppSeed derive from?
+- Is a KeyOS-drawn confirmation prompt for high-impact approvals planned?
 - Can the simulator inject a Launcher QR handoff for testing?
