@@ -371,6 +371,33 @@ Change `app-id` in `app-config.toml`. The app's signing key is derived from the 
 - `agent/`: the agent-side library and `pa` CLI (see *Agent CLI*), and the GitHub gate (`agent/primeapprove/gate.py`, see *GitHub gate*). `agent/tests/test_gate.py` runs the gate against a local fake GitHub API: approve posts success on the exact SHA, deny posts failure, a moved head, a wrong repo, a reused reply, an expired request, a strange signer, repeated or extra request fields and unknown tools are all refused, merge mode merges only the approved SHA, and with a moved head both the gate and (with the test-only pre-check skip) the fake GitHub's 409 refuse. The token never appears in output.
 - `tools/decode_reply.py`: a wrapper around the agent library: `pa verify PHOTO`, or a check against explicit `--pubkey --id --kid --hash` values.
 - `tools/*.sh`: simulator driving and screenshot scripts.
+- `scripts/security_scan.sh`: a local, report-only secret and dependency scan (see *Security scan*). Its tests are `python3 scripts/test_security_scan.py`.
+
+## Security scan
+
+Before a change merges, run:
+
+    scripts/security_scan.sh
+
+The command only reports. It does not change this repository's code, git history, or git settings.
+
+It scans every tracked text file in the working tree for secrets, then every commit on local branches and tags. Commits that GitHub may still hold from a force-push, but that are no longer in this clone, are not scanned. It then audits each Rust `Cargo.lock` and the Python dependencies in `agent/`.
+
+Each check ends in exactly one of three states:
+
+| State | Meaning |
+|---|---|
+| **CLEAN** | The check finished and found nothing. |
+| **FINDINGS** | The check finished and found a secret or a dependency advisory. A secret is reported as the rule, file, commit, and line, plus a fingerprint (the first 16 hex characters of the SHA-256 of the matched value). The value is not printed. A dependency is reported as the advisory id, package, version, and lockfile. A Rust advisory also includes its kind: vulnerability, unmaintained, unsound, or yanked. |
+| **SCAN INCOMPLETE** | The check did not finish, because the tool is missing, crashed, timed out, or its output could not be read. The scan leaves that check as SCAN INCOMPLETE. |
+
+A fingerprint is fine in a local report. Do not paste one into a public issue, pull request, log, or chat. It is a hash of the secret, and with the file and line it can point someone at the value.
+
+The process exits 0 when every check is CLEAN, 1 when at least one check is FINDINGS and none is SCAN INCOMPLETE, and 2 when any check is SCAN INCOMPLETE. Findings from checks that did finish are still printed when the exit code is 2.
+
+`pip-audit` exits 1 when it finds vulnerabilities. That exit code is FINDINGS. An unreadable report, a crash, or a missing auditor is SCAN INCOMPLETE. A pinned requirements file is audited with `--no-deps --disable-pip`, so those packages are not installed. Without a lockfile, `pip-audit` installs the project's dependencies, and that install runs package code.
+
+Secrets use `gitleaks` when it is on `PATH` (or in `~/.local/bin`), otherwise `trufflehog`, otherwise built-in patterns: GitHub tokens, Stripe keys, Google and AWS keys, private key blocks (Ed25519, OpenSSH, and other PEM), and high-entropy assignments. Rust lockfiles use `cargo audit` when it is installed, otherwise `osv-scanner`. Python dependencies in `agent/` use `pip-audit`, otherwise `osv-scanner` for a requirements file or lockfile. `pip install --user pip-audit` and the release binaries for `gitleaks` and `osv-scanner` do not need root. `cargo install cargo-audit` installs the Rust auditor.
 
 ## About the screenshots
 
