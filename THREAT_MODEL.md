@@ -74,6 +74,24 @@ When the Prime shows a request inside the bordered panel and the person slides t
 
 **App seed (Foundation, 2026-10-19):** KeyOS says GetAppSeed stays stable across KeyOS updates but does not bind the publisher key. So the seed alone doesn't prove which publisher's build is running. Open test for the dev unit: does an app with the same id, signed with a different key, get the same seed? Until that's answered, don't treat the app seed as proof of publisher identity.
 
+## Accepted dependency advisories (2026-10-19)
+
+`scripts/security_scan.sh` (cargo audit) reports seven advisories that we accept for now. All are "unmaintained" notices, not known vulnerabilities, and none of these crates ends up in the app that runs on the Prime. The PR #3 check showed this with `cargo tree` on the device target, and a `strings` check of the unstripped device ELF found nothing from any of the seven.
+
+| Advisory | Crate and version | Kind | Why accepted |
+| --- | --- | --- | --- |
+| RUSTSEC-2025-0141 | bincode 2.0.1 | unmaintained | Not in the device dependency graph at all |
+| RUSTSEC-2024-0436 | paste 1.0.15 | unmaintained | Proc-macro; runs at compile time only |
+| RUSTSEC-2026-0206 | rustybuzz 0.18.0, 0.20.1 | unmaintained | Runs only on the build machine: 0.20.1 via usvg/resvg from `i-slint-compiler`, reached only through the Slint proc-macros; 0.18.0 as a build-dependency via `slint-keyos-platform-build` |
+| RUSTSEC-2026-0192 | ttf-parser 0.24.1, 0.25.1 | unmaintained | Runs only on the build machine: 0.25.1 via usvg/resvg from `i-slint-compiler`, reached only through the Slint proc-macros; 0.24.1 as a build-dependency via `slint-keyos-platform-build` |
+| RUSTSEC-2026-0371 | zbus_names 4.3.3 | unmaintained | Not in the device dependency graph at all |
+| RUSTSEC-2026-0370 | zvariant 5.13.0 | unmaintained | Not in the device dependency graph at all |
+| RUSTSEC-2026-0372 | zvariant_derive 5.13.0 | unmaintained | Not in the device dependency graph at all |
+
+They will keep showing up as findings in `scripts/security_scan.sh` because they are still in Cargo.lock. That is expected, not a new problem. Revisit them when Slint or KeyOS updates. Any advisory not in this table is new and needs a look.
+
+event-listener 5.4.1 (RUSTSEC-2026-0221, unsound) did reach the device through KeyOS `worker`; PR #3 fixed it by moving to 5.4.2.
+
 ## Open questions for Foundation
 
 - Can an app from a different publisher install with an app-id already in use, and what exactly does GetAppSeed derive from?
