@@ -72,6 +72,8 @@ When the Prime shows a request inside the bordered panel and the person slides t
 - GetAppSeed: designed to stay stable across KeyOS updates; does not bind the publisher key.
 - QuantumLink: SDK apps are expected to use it over Bluetooth and/or USB starting with KeyOS 1.5.0, as a path beside QR codes.
 
+**App seed (Foundation, 2026-10-19):** KeyOS says GetAppSeed stays stable across KeyOS updates but does not bind the publisher key. So the seed alone doesn't prove which publisher's build is running. Open test for the dev unit: does an app with the same id, signed with a different key, get the same seed? Until that's answered, don't treat the app seed as proof of publisher identity.
+
 ## Open questions for Foundation
 
 - Can an app from a different publisher install with an app-id already in use, and what exactly does GetAppSeed derive from?
