@@ -55,7 +55,9 @@ When the Prime shows a request inside the bordered panel and the person slides t
 | Key swapped during pairing | Blocked | Pairing code from both keys and a fresh nonce the Prime picks for each pairing (v0.7), compared on both screens; saved only on "Codes match"; agent pins the Prime's key after its user confirms. The nonce makes every code single-use; it does not replace the comparison |
 | Simulator approval mistaken for a real Prime's on GitHub | Mitigated | `pa gate-trust --simulator` marks the pinned key; the gate's status then says "Approved in simulator". Default is not simulator, so marking it is up to whoever pins the key |
 | Unpaired agent keeps access | Blocked | Unpairing is saved and survives a restart; that agent's requests are refused |
-| Fork reuses our app-id | Documented | The app key derives from app-id plus master seed; forks must change the app-id |
+| Fork reuses our app-id | Documented | The app key derives from app-id plus master seed; forks must change the app-id (see "Another app derives the same app key" below) |
+| Another app derives the same app key (GetAppSeed is not bound to the publisher key, per Foundation, 2026-10-19) | Open | Ask Foundation what the derivation binds to (app ID, name, or install); until answered, assume an app with the same identity could sign as Prime Approve |
+| Pairing lost after a KeyOS update | Mitigated | Foundation says GetAppSeed is designed to stay stable across KeyOS updates; confirm on hardware |
 
 ## Rules for anyone integrating
 
