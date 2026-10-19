@@ -56,7 +56,7 @@ When the Prime shows a request inside the bordered panel and the person slides t
 | Simulator approval mistaken for a real Prime's on GitHub | Mitigated | `pa gate-trust --simulator` marks the pinned key; the gate's status then says "Approved in simulator". Default is not simulator, so marking it is up to whoever pins the key |
 | Unpaired agent keeps access | Blocked | Unpairing is saved and survives a restart; that agent's requests are refused |
 | Pairing lost after a KeyOS update | Mitigated | Foundation says GetAppSeed is designed to stay stable across KeyOS updates (2026-10-19); confirm on hardware |
-| Another app derives our app key (same app-id, different publisher) | Open | The app key derives from app-id plus master seed, and Foundation confirmed (2026-10-19) that GetAppSeed does not bind the publisher key. Whether KeyOS lets a second publisher install an app with our app-id is unconfirmed; until it is, assume such an app could sign approvals as Prime Approve. Forks must change the app-id, and users should install only builds signed by our publisher key |
+| Another app derives our app key (same app-id, different publisher) | Open | The app key is believed to derive from app-id plus master seed (not confirmed by Foundation), and Foundation confirmed (2026-10-19) that GetAppSeed does not bind the publisher key. Whether KeyOS lets a second publisher install an app with our app-id is unconfirmed; until it is, assume such an app could sign approvals as Prime Approve. Forks must change the app-id, and users should install only builds signed by our publisher key |
 
 ## Rules for anyone integrating
 
